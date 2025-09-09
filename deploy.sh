@@ -27,7 +27,6 @@ fi
 
 
 
-
 echo "Stopping running container..."
 docker-compose down -v --remove-orphans || true
 
