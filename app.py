@@ -19,8 +19,6 @@ MODEL_PATH = "nanonets/Nanonets-OCR-s"
 
 def load_model_with_retry(max_retries=3, retry_delay=5):
     """Load model with retry logic and better error handling"""
-
-    
     # Try loading with different configurations
     model = AutoModelForImageTextToText.from_pretrained(
         MODEL_PATH,
@@ -28,7 +26,6 @@ def load_model_with_retry(max_retries=3, retry_delay=5):
         device_map="auto" if torch.cuda.is_available() else "cpu",
         attn_implementation="eager",
         trust_remote_code=True,
-        use_auth_token=os.environ.get("HF_TOKEN"),  # Use auth token if available
         local_files_only=False,
         resume_download=True,
         cache_dir="/app/.cache/huggingface"
