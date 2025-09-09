@@ -39,16 +39,6 @@ def load_model_with_retry(max_retries=3, retry_delay=5):
 
     print("Model loaded successfully!")
     return model, tokenizer, processor
-    
-    except Exception as e:
-        print(f"Attempt {attempt + 1} failed: {str(e)}")
-        
-        if attempt < max_retries - 1:
-            print(f"Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
-        else:
-            print("All retry attempts failed!")
-            raise e
 
 # Load model with retry mechanism
 try:
