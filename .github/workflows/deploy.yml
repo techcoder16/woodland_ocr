@@ -1,0 +1,38 @@
+name: Deploy Equity research frontend to the server
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install SSH key and known hosts
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          name: id_rsa
+          known_hosts: |
+            ${{ secrets.SSH_HOST }}
+          if_key_exists: replace
+
+      - name: Add SSH host to known_hosts
+        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Save private key
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > key.pem
+          chmod 600 key.pem
+
+      - name: Upload deployment script
+        run: |
+          scp -i key.pem -o StrictHostKeyChecking=no ./deploy.sh ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }}:~/deploy.sh
+
+      - name: Execute deployment script on server
+        run: |
+          ssh -i key.pem -o StrictHostKeyChecking=no ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }} "chmod +x ~/deploy.sh && ~/deploy.sh"

@@ -1,0 +1,99 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Hugging Face cache - IMPORTANT: Exclude these large cached models
+.cache/
+*.cache/
+.huggingface/
+transformers_cache/
+
+# Model files and checkpoints
+*.bin
+*.safetensors
+*.pt
+*.pth
+models/
+checkpoints/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Environments
+.env
+.venv
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Large data files
+*.csv
+*.json
+*.xml
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation
+docs/
+*.md
+README*
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Node.js (if any frontend components)
+node_modules/
+npm-debug.log*
+
+# Local development files
+.local/
+local_*
