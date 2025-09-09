@@ -19,48 +19,39 @@ MODEL_PATH = "nanonets/Nanonets-OCR-s"
 
 def load_model_with_retry(max_retries=3, retry_delay=5):
     """Load model with retry logic and better error handling"""
+
     
-    for attempt in range(max_retries):
-        try:
-            print(f"Loading model attempt {attempt + 1}/{max_retries}...")
-            
-            # Try loading with different configurations
-            model = AutoModelForImageTextToText.from_pretrained(
-                MODEL_PATH,
-                dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else "cpu",
-                attn_implementation="eager",
-                trust_remote_code=True,
-                use_auth_token=os.environ.get("HF_TOKEN"),  # Use auth token if available
-                local_files_only=False,
-                resume_download=True,
-                cache_dir="/app/.cache/huggingface"
-            )
-            
-            tokenizer = AutoTokenizer.from_pretrained(
-                MODEL_PATH,
-                trust_remote_code=True,
-                use_auth_token=os.environ.get("HF_TOKEN")
-            )
-            
-            processor = AutoProcessor.from_pretrained(
-                MODEL_PATH,
-                trust_remote_code=True,
-                use_auth_token=os.environ.get("HF_TOKEN")
-            )
-            
-            print("Model loaded successfully!")
-            return model, tokenizer, processor
-            
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {str(e)}")
-            
-            if attempt < max_retries - 1:
-                print(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:
-                print("All retry attempts failed!")
-                raise e
+    # Try loading with different configurations
+    model = AutoModelForImageTextToText.from_pretrained(
+        MODEL_PATH,
+        dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto" if torch.cuda.is_available() else "cpu",
+        attn_implementation="eager",
+        trust_remote_code=True,
+        use_auth_token=os.environ.get("HF_TOKEN"),  # Use auth token if available
+        local_files_only=False,
+        resume_download=True,
+        cache_dir="/app/.cache/huggingface"
+    )
+    
+    model.eval()
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    processor = AutoProcessor.from_pretrained(MODEL_PATH)
+
+
+    print("Model loaded successfully!")
+    return model, tokenizer, processor
+    
+    except Exception as e:
+        print(f"Attempt {attempt + 1} failed: {str(e)}")
+        
+        if attempt < max_retries - 1:
+            print(f"Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+        else:
+            print("All retry attempts failed!")
+            raise e
 
 # Load model with retry mechanism
 try:
