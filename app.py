@@ -16,10 +16,8 @@ os.environ["FLASH_ATTENTION_FORCE_DISABLE"] = "1"
 
 # Model path
 MODEL_PATH = "/app/hf_cache/models--nanonets--Nanonets-OCR-s/snapshots/3baad182cc87c65a1861f0c30357d3467e978172"
-
-def load_model_with_retry(max_retries=3, retry_delay=5):
+def load_model_with_retry():
     """Load model with retry logic and better error handling"""
-    # Try loading with different configurations
     try:
         # Load model
         model = AutoModelForImageTextToText.from_pretrained(
@@ -40,15 +38,15 @@ def load_model_with_retry(max_retries=3, retry_delay=5):
             processor = AutoProcessor.from_pretrained(MODEL_PATH, local_files_only=True)
         except Exception:
             print("⚠️ Falling back to AutoImageProcessor (torchvision not installed)")
+            from transformers import AutoImageProcessor
             processor = AutoImageProcessor.from_pretrained(MODEL_PATH, local_files_only=True)
 
         print("✅ Model, tokenizer, and processor loaded successfully!")
+        return model, tokenizer, processor   # <-- FIXED HERE ✅
 
     except Exception as e:
         print(f"❌ Failed to load model: {e}")
-        model, tokenizer, processor = None, None, None
-        
-        
+        return None, None, None
 
 # Load model with retry mechanism
 try:
