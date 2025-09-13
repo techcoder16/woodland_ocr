@@ -15,7 +15,7 @@ import time
 os.environ["FLASH_ATTENTION_FORCE_DISABLE"] = "1"
 
 # Model path
-MODEL_PATH = "/app/hf_cache/models--nanonets--Nanonets-OCR-s"
+MODEL_PATH = "/app/hf_cache/models--nanonets--Nanonets-OCR-s/3baad182cc87c65a1861f0c30357d3467e978172"
 
 def load_model_with_retry(max_retries=3, retry_delay=5):
     """Load model with retry logic and better error handling"""
@@ -28,7 +28,6 @@ def load_model_with_retry(max_retries=3, retry_delay=5):
         trust_remote_code=True,
         local_files_only=False,
         resume_download=True,
-        cache_dir="/app/.cache/huggingface"
     )
     
     model.eval()
