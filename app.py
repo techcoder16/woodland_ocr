@@ -4,7 +4,7 @@ from datetime import datetime
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 from PIL import Image
-from transformers import AutoTokenizer, AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoTokenizer, AutoProcessor, AutoModelForImageTextToText,AutoImageProcessor
 import torch
 import uvicorn
 from typing import Optional, Dict, Any
