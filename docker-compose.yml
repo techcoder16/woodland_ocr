@@ -1,13 +1,11 @@
 version: "3.9"
 
 services:
-  ocr-service:
+  ocr-api:
     build: .
-    container_name: ocr-api
+    container_name: nanonets-ocr
     ports:
       - "5006:5006"
-    restart: unless-stopped
     volumes:
-      - .:/app
-
-      
+      - ./uploads:/tmp   # store uploaded files
+    restart: unless-stopped
