@@ -17,7 +17,7 @@ model = AutoModelForImageTextToText.from_pretrained(
     MODEL_PATH,
     torch_dtype="auto",
     device_map="auto",
-    attn_implementation="flash_attention_2"
+    attn_implementation="eager" 
 )
 model.eval()
 
