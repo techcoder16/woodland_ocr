@@ -41,7 +41,7 @@ def load_model_with_retry():
             from transformers import AutoImageProcessor
             processor = AutoImageProcessor.from_pretrained(MODEL_PATH, local_files_only=True)
 
-        print("✅ Model, tokenizer, and processor loaded successfully!")
+        print("Model, tokenizer, and processor loaded successfully!")
         return model, tokenizer, processor   # <-- FIXED HERE ✅
 
     except Exception as e:
@@ -373,7 +373,7 @@ async def extract_transaction_data(
 
 @app.post("/ocr")
 async def extract_text(file: UploadFile = File(...)):
-    """Original OCR endpoint for general text extraction"""
+    """OCR endpoint for general text extraction"""
     if not MODEL_LOADED:
         return JSONResponse(
             content={"error": "Model not loaded. Service is not available."}, 
@@ -381,36 +381,48 @@ async def extract_text(file: UploadFile = File(...)):
         )
     
     try:
+        # Save uploaded file
         file_path = f"/tmp/{file.filename}"
         with open(file_path, "wb") as buffer:
             buffer.write(await file.read())
         
+        # Define OCR prompt
         prompt = """Extract the text from the above document as if you were reading it naturally.
         Return the tables in json format. Return the equations in LaTeX representation. If there is an image in the document and image caption is not present,
         add a small description of the image inside the <img></img> tag; otherwise, add the image caption inside <img></img>.
         Watermarks should be wrapped in brackets. Ex: <watermark>OFFICIAL COPY</watermark>. Page numbers should be wrapped in brackets. Ex: <page_number>14</page_number> or 
         <page_number>9/22</page_number>. Prefer using ☐ and ☑ for check boxes."""
         
+        # Open image
         image = Image.open(file_path)
+
+        # Build messages
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": [
-                {"type": "image", "image": f"file://{file_path}"},
-                {"type": "text", "text": prompt},
-            ]},
+            {"role": "user", "content": prompt},
         ]
-        
-        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = processor(text=[text], images=[image], padding=True, return_tensors="pt")
-        inputs = inputs.to(model.device)
-        
+
+        # Use tokenizer for chat template
+        chat_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+        # Process image
+        inputs = processor(images=image, return_tensors="pt")
+        # Add tokenized text
+        text_inputs = tokenizer(chat_text, return_tensors="pt")
+
+        # Merge
+        inputs.update(text_inputs)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+        # Generate output
         output_ids = model.generate(**inputs, max_new_tokens=15000, do_sample=False)
-        generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, output_ids)]
-        result = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-        
+        result = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+        # Cleanup
         os.remove(file_path)
-        return JSONResponse(content={"text": result[0]})
-        
+
+        return JSONResponse(content={"text": result})
+    
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
