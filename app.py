@@ -370,57 +370,63 @@ async def extract_transaction_data(
             }, 
             status_code=500
         )
-
 @app.post("/ocr")
 async def extract_text(file: UploadFile = File(...)):
-    """OCR endpoint for general text extraction"""
+    """OCR endpoint for nanonets/Nanonets-OCR-s (Qwen2VL backbone)"""
     if not MODEL_LOADED:
         return JSONResponse(
             content={"error": "Model not loaded. Service is not available."}, 
             status_code=503
         )
-    
+
     try:
         # Save uploaded file
         file_path = f"/tmp/{file.filename}"
         with open(file_path, "wb") as buffer:
             buffer.write(await file.read())
         
-        # Prompt
-        prompt = """Extract the text from the above document as if you were reading it naturally.
-        Return the tables in json format. Return the equations in LaTeX representation. If there is an image in the document and image caption is not present,
-        add a small description of the image inside the <img></img> tag; otherwise, add the image caption inside <img></img>.
-        Watermarks should be wrapped in brackets. Ex: <watermark>OFFICIAL COPY</watermark>. Page numbers should be wrapped in brackets. Ex: <page_number>14</page_number> or 
-        <page_number>9/22</page_number>. Prefer using ☐ and ☑ for check boxes."""
-        
-        # Load image
         image = Image.open(file_path)
 
-        # Build multimodal message
+        # OCR instructions
+        prompt = """Extract the text from the above document as if you were reading it naturally.
+        Return the tables in json format. Return the equations in LaTeX representation. 
+        If there is an image and no caption, add a short description inside <img></img>, 
+        otherwise put the caption inside <img></img>. 
+        Wrap watermarks in <watermark> tags and page numbers in <page_number> tags.
+        Prefer using ☐ and ☑ for checkboxes."""
+
+        # Build chat messages
         messages = [
             {"role": "system", "content": "You are a helpful OCR assistant."},
             {"role": "user", "content": [
                 {"type": "image", "image": image},
-                {"type": "text", "text": prompt}
+                {"type": "text", "text": prompt},
             ]},
         ]
 
-        # Use tokenizer to build chat template
-        chat_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        # Convert to chat template (text prompt string)
+        chat_text = tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
 
-        # Use processor to combine text + image
-        inputs = processor(text=chat_text, images=image, return_tensors="pt", padding=True)
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        # Tokenize the text prompt
+        text_inputs = tokenizer(chat_text, return_tensors="pt").to(model.device)
 
-        # Generate response
+        # Process the image
+        image_inputs = processor(images=image, return_tensors="pt").to(model.device)
+
+        # Merge text + vision inputs
+        inputs = {**text_inputs, **image_inputs}
+
+        # Generate output
         output_ids = model.generate(**inputs, max_new_tokens=15000, do_sample=False)
         result = tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
-        # Cleanup
         os.remove(file_path)
-
         return JSONResponse(content={"text": result})
-    
+
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
