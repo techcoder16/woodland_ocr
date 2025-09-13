@@ -51,9 +51,17 @@ def load_model_with_retry():
 # Load model with retry mechanism
 try:
     model, tokenizer, processor = load_model_with_retry()
-    model.eval()
-    MODEL_LOADED = True
-    print("Model initialization completed successfully!")
+    if model is not None:
+        MODEL_LOADED = True
+        print("Model initialization completed successfully!")
+    else:
+        MODEL_LOADED = False
+        
+    # model.eval()
+    # MODEL_LOADED = True
+
+    # print("Model initialization completed successfully!")
+
 except Exception as e:
     print(f"Failed to load model: {e}")
     MODEL_LOADED = False
