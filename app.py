@@ -20,24 +20,34 @@ MODEL_PATH = "/app/hf_cache/models--nanonets--Nanonets-OCR-s/snapshots/3baad182c
 def load_model_with_retry(max_retries=3, retry_delay=5):
     """Load model with retry logic and better error handling"""
     # Try loading with different configurations
-    model = AutoModelForImageTextToText.from_pretrained(
-        MODEL_PATH,
-        dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        device_map="auto" if torch.cuda.is_available() else "cpu",
-        attn_implementation="eager",
-        trust_remote_code=True,
-        local_files_only=False,
-        resume_download=True,
-    )
-    
-    model.eval()
+    try:
+        # Load model
+        model = AutoModelForImageTextToText.from_pretrained(
+            MODEL_PATH,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto" if torch.cuda.is_available() else "cpu",
+            attn_implementation="eager",
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+        model.eval()
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    processor = AutoProcessor.from_pretrained(MODEL_PATH)
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
 
+        # Load processor (fallback to image-only if torchvision missing)
+        try:
+            processor = AutoProcessor.from_pretrained(MODEL_PATH, local_files_only=True)
+        except Exception:
+            print("⚠️ Falling back to AutoImageProcessor (torchvision not installed)")
+            processor = AutoImageProcessor.from_pretrained(MODEL_PATH, local_files_only=True)
 
-    print("Model loaded successfully!")
-    return model, tokenizer, processor
+        print("✅ Model, tokenizer, and processor loaded successfully!")
+
+    except Exception as e:
+        print(f"❌ Failed to load model: {e}")
+        model, tokenizer, processor = None, None, None
+        
 
 # Load model with retry mechanism
 try:
