@@ -386,35 +386,33 @@ async def extract_text(file: UploadFile = File(...)):
         with open(file_path, "wb") as buffer:
             buffer.write(await file.read())
         
-        # Define OCR prompt
+        # Prompt
         prompt = """Extract the text from the above document as if you were reading it naturally.
         Return the tables in json format. Return the equations in LaTeX representation. If there is an image in the document and image caption is not present,
         add a small description of the image inside the <img></img> tag; otherwise, add the image caption inside <img></img>.
         Watermarks should be wrapped in brackets. Ex: <watermark>OFFICIAL COPY</watermark>. Page numbers should be wrapped in brackets. Ex: <page_number>14</page_number> or 
         <page_number>9/22</page_number>. Prefer using ☐ and ☑ for check boxes."""
         
-        # Open image
+        # Load image
         image = Image.open(file_path)
 
-        # Build messages
+        # Build multimodal message
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": "You are a helpful OCR assistant."},
+            {"role": "user", "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": prompt}
+            ]},
         ]
 
-        # Use tokenizer for chat template
+        # Use tokenizer to build chat template
         chat_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-        # Process image
-        inputs = processor(images=image, return_tensors="pt")
-        # Add tokenized text
-        text_inputs = tokenizer(chat_text, return_tensors="pt")
-
-        # Merge
-        inputs.update(text_inputs)
+        # Use processor to combine text + image
+        inputs = processor(text=chat_text, images=image, return_tensors="pt", padding=True)
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-        # Generate output
+        # Generate response
         output_ids = model.generate(**inputs, max_new_tokens=15000, do_sample=False)
         result = tokenizer.decode(output_ids[0], skip_special_tokens=True)
 
