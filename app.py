@@ -35,7 +35,7 @@ def load_model_with_retry(max_retries=3, retry_delay=5):
         # Load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
 
-        # Load processor (fallback to image-only if torchvision missing)
+        # Load processor (fallback if torchvision missing)
         try:
             processor = AutoProcessor.from_pretrained(MODEL_PATH, local_files_only=True)
         except Exception:
@@ -47,6 +47,7 @@ def load_model_with_retry(max_retries=3, retry_delay=5):
     except Exception as e:
         print(f"❌ Failed to load model: {e}")
         model, tokenizer, processor = None, None, None
+        
         
 
 # Load model with retry mechanism
