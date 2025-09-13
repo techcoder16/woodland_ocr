@@ -4,5 +4,6 @@ pillow
 torch
 torchvision
 transformers
+accelerate
 
 python-multipart

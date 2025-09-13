@@ -28,8 +28,7 @@ fi
 
 
 echo "Stopping running container..."
-docker-compose down -v --remove-orphans || true
-
+docker-compose down --rmi all --volumes --remove-orphans || true
 
 echo "Starting a new..."
 docker-compose up --build -d || true
