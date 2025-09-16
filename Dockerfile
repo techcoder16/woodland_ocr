@@ -11,6 +11,10 @@ WORKDIR /app
 # Install system deps
 RUN apt-get update && apt-get install -y \
     git \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements
@@ -18,10 +22,14 @@ COPY requirements.txt .
 
 # Install python deps
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install uvicorn[standard]
-RUN pip install fastapi
 
-# Copy project
+# Install torch + torchvision (CPU-only version, so it runs on your system)
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Install FastAPI + Uvicorn (in case requirements.txt didn’t have them)
+RUN pip install --no-cache-dir fastapi uvicorn[standard]
+
+# Copy project files
 COPY . .
 
 # Expose port
