@@ -56,6 +56,7 @@ model_int8 = torch.quantization.quantize_dynamic(
     dtype=torch.qint8
 )
 
+
 # ------------------------
 # FastAPI App
 # ------------------------
