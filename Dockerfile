@@ -18,6 +18,7 @@ COPY requirements.txt .
 
 # Install python deps
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install uvicorn[standard]
 
 # Copy project
 COPY . .
