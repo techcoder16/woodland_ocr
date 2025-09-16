@@ -38,7 +38,8 @@
 import torch
 from transformers import AutoProcessor, VisionEncoderDecoderModel
 from fastapi import FastAPI, File, UploadFile
-from PIL import Image
+from fastapi.responses import JSONResponse
+from PIL import Image, UnidentifiedImageError
 import io
 
 # ------------------------
@@ -47,15 +48,14 @@ import io
 model_name = "nanonets/Nanonets-OCR-s"
 
 processor = AutoProcessor.from_pretrained(model_name)
-model = VisionEncoderDecoderModel.from_pretrained(model_name).to("cpu")
+model = VisionEncoderDecoderModel.from_pretrained(model_name)
 
-# Quantize for CPU
-model_int8 = torch.quantization.quantize_dynamic(
+# Quantize for CPU (int8) — improves speed and memory
+model = torch.quantization.quantize_dynamic(
     model,
     {torch.nn.Linear},
     dtype=torch.qint8
-)
-
+).to("cpu")
 
 # ------------------------
 # FastAPI App
@@ -64,19 +64,21 @@ app = FastAPI()
 
 @app.post("/ocr/")
 async def ocr_endpoint(file: UploadFile = File(...)):
-    # Read uploaded image
-    contents = await file.read()
-    image = Image.open(io.BytesIO(contents)).convert("RGB")
+    try:
+        # Read uploaded image
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+    except UnidentifiedImageError:
+        return JSONResponse(status_code=400, content={"error": "Invalid image file"})
 
     # Preprocess image
     inputs = processor(images=image, return_tensors="pt")
 
     # Run model (inference)
     with torch.no_grad():
-        outputs = model_int8.generate(**inputs, max_new_tokens=256)
+        outputs = model.generate(**inputs, max_new_tokens=256)
 
     # Decode OCR result
     text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
 
     return {"ocr_text": text}
-
