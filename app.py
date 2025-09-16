@@ -36,7 +36,7 @@
 # clean_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 # print(clean_text)
 import torch
-from transformers import AutoProcessor, AutoModelForImageTextGeneration
+from transformers import AutoProcessor, VisionEncoderDecoderModel
 from fastapi import FastAPI, File, UploadFile
 from PIL import Image
 import io
@@ -47,7 +47,7 @@ import io
 model_name = "nanonets/Nanonets-OCR-s"
 
 processor = AutoProcessor.from_pretrained(model_name)
-model = AutoModelForImageTextGeneration.from_pretrained(model_name).to("cpu")
+model = VisionEncoderDecoderModel.from_pretrained(model_name).to("cpu")
 
 # Quantize for CPU
 model_int8 = torch.quantization.quantize_dynamic(
