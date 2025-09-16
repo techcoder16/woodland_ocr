@@ -36,49 +36,31 @@
 # clean_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 # print(clean_text)
 import torch
-from transformers import AutoProcessor, VisionEncoderDecoderModel
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
-from PIL import Image, UnidentifiedImageError
+from transformers import AutoImageProcessor, AutoTokenizer, VisionEncoderDecoderModel
+from fastapi import FastAPI, UploadFile, File
+from PIL import Image
 import io
 
-# ------------------------
-# Load model & processor
-# ------------------------
+app = FastAPI()
+
 model_name = "nanonets/Nanonets-OCR-s"
 
-processor = AutoProcessor.from_pretrained(model_name)
-model = VisionEncoderDecoderModel.from_pretrained(model_name)
-
-# Quantize for CPU (int8) — improves speed and memory
-model = torch.quantization.quantize_dynamic(
-    model,
-    {torch.nn.Linear},
-    dtype=torch.qint8
-).to("cpu")
-
-# ------------------------
-# FastAPI App
-# ------------------------
-app = FastAPI()
+# Load model + components
+model = VisionEncoderDecoderModel.from_pretrained(model_name).to("cpu")
+image_processor = AutoImageProcessor.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 @app.post("/ocr/")
 async def ocr_endpoint(file: UploadFile = File(...)):
-    try:
-        # Read uploaded image
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-    except UnidentifiedImageError:
-        return JSONResponse(status_code=400, content={"error": "Invalid image file"})
+    # Read image
+    contents = await file.read()
+    image = Image.open(io.BytesIO(contents)).convert("RGB")
 
-    # Preprocess image
-    inputs = processor(images=image, return_tensors="pt")
+    # Preprocess
+    pixel_values = image_processor(image, return_tensors="pt").pixel_values
 
-    # Run model (inference)
-    with torch.no_grad():
-        outputs = model.generate(**inputs, max_new_tokens=256)
-
-    # Decode OCR result
-    text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
+    # Run inference
+    output_ids = model.generate(pixel_values)
+    text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
 
     return {"ocr_text": text}
