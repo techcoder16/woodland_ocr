@@ -61,6 +61,7 @@ model_int8 = torch.quantization.quantize_dynamic(
 # ------------------------
 app = FastAPI()
 
+
 @app.post("/ocr/")
 async def ocr_endpoint(file: UploadFile = File(...)):
     # Read uploaded image
