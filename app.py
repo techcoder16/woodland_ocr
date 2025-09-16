@@ -1,80 +1,81 @@
-import os
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
-from PIL import Image
-from transformers import AutoTokenizer, AutoProcessor, AutoModelForImageTextToText
+
+# from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+# from PIL import Image
+# import requests
+
+# # load image from the IAM database
+# url = 'abc.png'
+# image = Image.open(requests.get(url, stream=True).raw).convert("RGB")
+
+# processor = TrOCRProcessor.from_pretrained('microsoft/trocr-base-handwritten')
+# model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-base-handwritten')
+# pixel_values = processor(images=image, return_tensors="pt").pixel_values
+
+# generated_ids = model.generate(pixel_values)
+# generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+
+
+# from paddleocr import PaddleOCR
+# from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# # Step 1: OCR
+# ocr = PaddleOCR(use_angle_cls=True, lang='en')
+# results = ocr.predict("abc.png")
+
+# raw_text = "\n".join([line[1][0] for line in results[0]])
+
+# # Step 2: LLM Cleanup
+# model_name = "HuggingFaceTB/SmolLM-135M-Instruct"
+# tokenizer = AutoTokenizer.from_pretrained(model_name)
+# model = AutoModelForCausalLM.from_pretrained(model_name)
+# prompt = f"Clean and structure this OCR text properly:\n\n{raw_text}"
+# inputs = tokenizer(prompt, return_tensors="pt")
+# outputs = model.generate(**inputs, max_new_tokens=500)
+# print(outputs)
+# clean_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+# print(clean_text)
 import torch
-import uvicorn
+from transformers import AutoProcessor, AutoModelForImageTextGeneration
+from fastapi import FastAPI, File, UploadFile
+from PIL import Image
+import io
 
-# Disable FlashAttention issues if needed
-os.environ["FLASH_ATTENTION_FORCE_DISABLE"] = "1"
+# ------------------------
+# Load model & processor
+# ------------------------
+model_name = "nanonets/Nanonets-OCR-s"
 
-# Load model
-MODEL_PATH = "nanonets/Nanonets-OCR-s"
+processor = AutoProcessor.from_pretrained(model_name)
+model = AutoModelForImageTextGeneration.from_pretrained(model_name).to("cpu")
 
-print("Loading model...")
-model = AutoModelForImageTextToText.from_pretrained(
-    MODEL_PATH,
-    torch_dtype="auto",
-    device_map="auto",
-    attn_implementation="eager" 
+# Quantize for CPU
+model_int8 = torch.quantization.quantize_dynamic(
+    model,
+    {torch.nn.Linear},
+    dtype=torch.qint8
 )
-model.eval()
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-processor = AutoProcessor.from_pretrained(MODEL_PATH)
-
-print("Model loaded successfully!")
-
-# FastAPI app
+# ------------------------
+# FastAPI App
+# ------------------------
 app = FastAPI()
 
-
-def run_ocr(image_path: str, max_new_tokens: int = 4096):
-    """Run OCR on a single page with NanoNets model"""
-    prompt = """Extract the text from the above document as if you were reading it naturally. 
-    Return the tables in html format. Return the equations in LaTeX representation. 
-    If there is an image in the document and image caption is not present, add a small description of the image inside the <img></img> tag; 
-    otherwise, add the image caption inside <img></img>. 
-    Watermarks should be wrapped in brackets. Ex: <watermark>OFFICIAL COPY</watermark>. 
-    Page numbers should be wrapped in brackets. Ex: <page_number>14</page_number>. 
-    Prefer using ☐ and ☑ for check boxes.
-    """
-
-    image = Image.open(image_path)
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": [
-            {"type": "image", "image": f"file://{image_path}"},
-            {"type": "text", "text": prompt},
-        ]},
-    ]
-
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = processor(text=[text], images=[image], padding=True, return_tensors="pt")
-    inputs = inputs.to(model.device)
-
-    output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
-    generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, output_ids)]
-
-    output_text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-    return output_text[0]
-
-
-@app.post("/ocr")
+@app.post("/ocr/")
 async def ocr_endpoint(file: UploadFile = File(...)):
-    """API endpoint for OCR"""
-    try:
-        file_path = f"/tmp/{file.filename}"
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
+    # Read uploaded image
+    contents = await file.read()
+    image = Image.open(io.BytesIO(contents)).convert("RGB")
 
-        result = run_ocr(file_path, max_new_tokens=8000)
-        return {"text": result}
+    # Preprocess image
+    inputs = processor(images=image, return_tensors="pt")
 
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    # Run model (inference)
+    with torch.no_grad():
+        outputs = model_int8.generate(**inputs, max_new_tokens=256)
 
+    # Decode OCR result
+    text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
 
-if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=5006)
+    return {"ocr_text": text}
+

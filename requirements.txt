@@ -1,9 +1,5 @@
-fastapi
-uvicorn[standard]
-pillow
 torch
-torchvision
 transformers
-accelerate
-
-python-multipart
+pillow
+opencv-python
+pytesseract
