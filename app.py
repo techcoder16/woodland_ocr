@@ -36,31 +36,50 @@
 # clean_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 # print(clean_text)
 import torch
-from transformers import AutoImageProcessor, AutoTokenizer, VisionEncoderDecoderModel
-from fastapi import FastAPI, UploadFile, File
+from transformers import AutoProcessor, AutoModelForVision2Seq
+from fastapi import FastAPI, File, UploadFile
 from PIL import Image
 import io
 
-app = FastAPI()
-
+# ------------------------
+# Load model & processor
+# ------------------------
 model_name = "nanonets/Nanonets-OCR-s"
 
-# Load model + components
-model = VisionEncoderDecoderModel.from_pretrained(model_name).to("cpu")
-image_processor = AutoImageProcessor.from_pretrained(model_name)
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+processor = AutoProcessor.from_pretrained(model_name)
+model = AutoModelForVision2Seq.from_pretrained(model_name).to("cpu")
+
+# Quantize for CPU (INT8)
+model_int8 = torch.quantization.quantize_dynamic(
+    model,
+    {torch.nn.Linear},
+    dtype=torch.qint8
+)
+
+# ------------------------
+# FastAPI App
+# ------------------------
+app = FastAPI()
 
 @app.post("/ocr/")
 async def ocr_endpoint(file: UploadFile = File(...)):
-    # Read image
+    # Read uploaded image
     contents = await file.read()
     image = Image.open(io.BytesIO(contents)).convert("RGB")
 
     # Preprocess
-    pixel_values = image_processor(image, return_tensors="pt").pixel_values
+    inputs = processor(images=image, return_tensors="pt").to("cpu")
 
-    # Run inference
-    output_ids = model.generate(pixel_values)
-    text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+    # Run model
+    with torch.no_grad():
+        outputs = model_int8.generate(**inputs, max_new_tokens=256)
+
+    # Decode OCR result
+    text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
 
     return {"ocr_text": text}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5006)
