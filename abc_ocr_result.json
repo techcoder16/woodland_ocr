@@ -1,0 +1,117 @@
+{
+  "status": "success",
+  "extracted_text": "n a o t o e e e e e e e i e e",
+  "entities": {
+    "dates": [],
+    "numbers": [],
+    "names": [],
+    "locations": []
+  },
+  "confidence": 1.0,
+  "method_used": "PaddleOCR",
+  "raw_ocr_results": [
+    {
+      "text": "n",
+      "confidence": 1.0,
+      "bbox": "i",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "a",
+      "confidence": 1.0,
+      "bbox": "p",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "o",
+      "confidence": 1.0,
+      "bbox": "d",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "t",
+      "confidence": 1.0,
+      "bbox": "d",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "o",
+      "confidence": 1.0,
+      "bbox": "m",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "e",
+      "confidence": 1.0,
+      "bbox": "t",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "e",
+      "confidence": 1.0,
+      "bbox": "t",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "e",
+      "confidence": 1.0,
+      "bbox": "t",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "e",
+      "confidence": 1.0,
+      "bbox": "r",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "e",
+      "confidence": 1.0,
+      "bbox": "r",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "e",
+      "confidence": 1.0,
+      "bbox": "r",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "e",
+      "confidence": 1.0,
+      "bbox": "r",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "i",
+      "confidence": 1.0,
+      "bbox": "v",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "e",
+      "confidence": 1.0,
+      "bbox": "t",
+      "method": "PaddleOCR"
+    },
+    {
+      "text": "e",
+      "confidence": 1.0,
+      "bbox": "r",
+      "method": "PaddleOCR"
+    }
+  ],
+  "processing_info": {
+    "total_text_regions": 15,
+    "timestamp": "2025-09-20T12:22:04.794454"
+  },
+  "image_info": {
+    "path": "abc.png",
+    "is_handwritten": false,
+    "dimensions": [
+      957,
+      905,
+      3
+    ]
+  }
+}

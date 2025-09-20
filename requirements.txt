@@ -1,5 +1,3 @@
-torch
-transformers
-pillow
-opencv-python
-pytesseract
+fastapi
+uvicorn[standard]
+docstrange

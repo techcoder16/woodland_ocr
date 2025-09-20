@@ -1,11 +1,10 @@
 version: "3.9"
 
 services:
-  ocr-api:
+  ocr:
     build: .
-    container_name: ocr_service
+    container_name: ocr-service
     ports:
-      - "5006:5006"
+      - "8000:8000"
     volumes:
-      - .:/app
-    restart: unless-stopped
+      - ./uploads:/tmp   # for storing temp files
