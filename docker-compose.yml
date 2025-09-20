@@ -5,6 +5,6 @@ services:
     build: .
     container_name: ocr-service
     ports:
-      - "8000:8000"
+      - "5006:5006"
     volumes:
       - ./uploads:/tmp   # for storing temp files
