@@ -1,4 +1,5 @@
 import os
+os.load.dotenv()
 class Config:
     API_KEYS = [
         os.getenv("DOCSTRANGE_API_KEY1"),
