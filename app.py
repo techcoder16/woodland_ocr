@@ -113,12 +113,13 @@ def get_usage_summary(db: Session) -> dict:
 
 def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[dict]:
     """Make a request to Docstrange API with a prompt."""
-    files = {"file": ("upload.png", image_bytes, "image/png")}
+    files = {"file": ("upload.png", image_bytes, "*")}
+
     data = {"output_type": "json"}
     print("Prompt being sent to API:", api_key)  # Debugging line
     try:
         response = requests.post(
-            config.DOCSTRANGE_API_URL,
+            url=config.DOCSTRANGE_API_URL,
             headers={"Authorization": f"Bearer {api_key}"},
             files=files,
             data=data,
