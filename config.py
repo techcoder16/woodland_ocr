@@ -2,6 +2,9 @@ import os
 from dotenv import load_dotenv  # <-- make sure python-dotenv is installed
 
 load_dotenv()
+print("DOCSTRANGE_API_KEY1:", os.getenv("DOCSTRANGE_API_KEY1"))
+print("DOCSTRANGE_API_KEY2:", os.getenv("DOCSTRANGE_API_KEY2"))
+
 
 class Config:
     API_KEYS = [
