@@ -25,3 +25,6 @@ class APIUsage(Base):
     request_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+Base.metadata.create_all(bind=engine)
