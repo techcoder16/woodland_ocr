@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv  # <-- make sure python-dotenv is installed
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+load_dotenv(dotenv_path="/app/.env")
 print("Current working dir:", os.getcwd())
 
 print("DOCSTRANGE_API_KEY1:", os.getenv("DOCSTRANGE_API_KEY1"))

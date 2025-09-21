@@ -5,12 +5,13 @@ services:
     build: .
     ports:
       - "5006:5006"
-    environment:
-      - DATABASE_URL=sqlite:///./document_processor.db  # Using SQLite for simplicity
-      - DOCSTRANGE_API_KEY=${DOCSTRANGE_API_KEY1}  # Only one API key needed
-      - MONTHLY_REQUEST_LIMIT=10000
-      - DOCSTRANGE_API_URL=https://api.docstrange.com/v1/ocr
-      - REQUEST_TIMEOUT=60
+    # environment:
+    #   - DATABASE_URL=sqlite:///./document_processor.db  # Using SQLite for simplicity
+    #   - DOCSTRANGE_API_KEY=${DOCSTRANGE_API_KEY1}  # Only one API key needed
+    #   - MONTHLY_REQUEST_LIMIT=10000
+    #   - DOCSTRANGE_API_URL=https://api.docstrange.com/v1/ocr
+    #   - REQUEST_TIMEOUT=60
+
     volumes:
       - ./data:/app/data  # Persist SQLite database
       - ./uploads:/app/uploads
