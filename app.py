@@ -11,12 +11,12 @@ from sqlalchemy.orm import sessionmaker, Session
 import logging
 from config import config
 
-from models import ProcessedDocument, APIUsage
-from database import SessionLocal, engine
 from pydantic import BaseModel
+from database import Base
+
 from models import ProcessedDocument, APIUsage
 from database import SessionLocal, engine
-from database import Base
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ def get_usage_summary(db: Session) -> dict:
 def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[dict]:
     """Make a request to Docstrange API with a prompt."""
     files = {"file": ("upload.png", image_bytes, "image/png")}
-    data = {"prompt": prompt}
+    data = {"output_type": "json"}
     
     try:
         response = requests.post(
