@@ -6,9 +6,8 @@ import requests
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, Boolean
-from models import Base, ProcessedDocument, APIUsage
-from database import SessionLocal, engine
-from config import config
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 import logging
 
@@ -18,6 +17,61 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Document Processing API", version="1.0.0")
 
+# -----------------------------
+# Database Models
+# -----------------------------
+Base = declarative_base()
+
+class ProcessedDocument(Base):
+    __tablename__ = "processed_documents"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    image_hash = Column(String, unique=True, index=True)
+    prompt = Column(Text)
+    result = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    file_name = Column(String)
+
+class APIUsage(Base):
+    __tablename__ = "api_usage"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    api_key_name = Column(String)
+    month_year = Column(String)  # Format: YYYY-MM
+    request_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+# -----------------------------
+# Database Setup
+# -----------------------------
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./document_processor.db")
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+# -----------------------------
+# Configuration
+# -----------------------------
+class Config:
+    API_KEYS = [
+        os.getenv("DOCSTRANGE_API_KEY1"),
+        os.getenv("DOCSTRANGE_API_KEY2"),
+    ]
+    # Filter out None values
+    API_KEYS = [key for key in API_KEYS if key is not None]
+    
+    MONTHLY_LIMIT = int(os.getenv("MONTHLY_REQUEST_LIMIT", "10000"))
+    DOCSTRANGE_API_URL = os.getenv("DOCSTRANGE_API_URL", "https://api.docstrange.com/v1/ocr")
+    REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60"))
+
+config = Config()
+
+# -----------------------------
+# Pydantic Models
+# -----------------------------
 class ProcessResponse(BaseModel):
     cached: bool
     result: dict
@@ -280,4 +334,4 @@ async def cache_stats(db: Session = Depends(get_db)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=5006)
