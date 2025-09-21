@@ -16,11 +16,13 @@ from database import SessionLocal, engine
 from pydantic import BaseModel
 from models import ProcessedDocument, APIUsage
 from database import SessionLocal, engine
+from database import Base
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 from pydantic_model import ProcessResponse
 app = FastAPI(title="Document Processing API", version="1.0.0")
+Base.metadata.create_all(bind=engine)
 
 # -----------------------------
 # Database Models
