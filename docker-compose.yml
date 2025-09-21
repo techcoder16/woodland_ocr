@@ -1,43 +1,17 @@
-
-# docker-compose.yml
 version: '3.8'
 
 services:
   app:
     build: .
     ports:
-      - "5006:5006"
+      - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://docprocessor:woodland123@db:5432/docprocessor_db
-      - DOCSTRANGE_API_KEY1=${DOCSTRANGE_API_KEY1}
-      - DOCSTRANGE_API_KEY2=${DOCSTRANGE_API_KEY2}
+      - DATABASE_URL=sqlite:///./document_processor.db  # Using SQLite for simplicity
+      - DOCSTRANGE_API_KEY=${DOCSTRANGE_API_KEY1}  # Only one API key needed
       - MONTHLY_REQUEST_LIMIT=10000
       - DOCSTRANGE_API_URL=https://api.docstrange.com/v1/ocr
       - REQUEST_TIMEOUT=60
-    depends_on:
-      db:
-        condition: service_healthy
     volumes:
-      - ./uploads:/app/uploads  # Optional: for file uploads
+      - ./data:/app/data  # Persist SQLite database
+      - ./uploads:/app/uploads
     restart: unless-stopped
-
-  db:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_DB=docprocessor_db
-      - POSTGRES_USER=docprocessor
-      - POSTGRES_PASSWORD=woodland123
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"  # Optional: expose for external access
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U docprocessor -d docprocessor_db"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-
-volumes:
-  postgres_data:
