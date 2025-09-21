@@ -12,7 +12,9 @@ import logging
 from config import config
 from models import ProcessedDocument, APIUsage
 from database import SessionLocal, engine
-
+from pydantic import BaseModel
+from models import ProcessedDocument, APIUsage
+from database import SessionLocal, engine
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
