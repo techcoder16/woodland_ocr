@@ -5,6 +5,9 @@ from typing import Optional
 import requests
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, Boolean
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
 import logging
 from config import config
 from models import ProcessedDocument, APIUsage
@@ -19,6 +22,8 @@ app = FastAPI(title="Document Processing API", version="1.0.0")
 # -----------------------------
 # Database Models
 # -----------------------------
+Base = declarative_base()
+
 
 # -----------------------------
 # Database Setup
@@ -30,13 +35,6 @@ app = FastAPI(title="Document Processing API", version="1.0.0")
 # -----------------------------
 # Pydantic Models
 # -----------------------------
-class ProcessResponse(BaseModel):
-    cached: bool
-    result: dict
-    usage: dict
-    used_key: Optional[str] = None
-    message: Optional[str] = None
-
 # -----------------------------
 # Database Dependency
 # -----------------------------
