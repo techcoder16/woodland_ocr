@@ -1,10 +1,54 @@
-version: "3.9"
+
+# docker-compose.yml
+version: '3.8'
 
 services:
-  ocr:
+  app:
     build: .
-    container_name: ocr-service
     ports:
       - "5006:5006"
+    environment:
+      - DATABASE_URL=postgresql://docprocessor:woodland123@db:5432/docprocessor_db
+      - DOCSTRANGE_API_KEY1=${DOCSTRANGE_API_KEY1}
+      - DOCSTRANGE_API_KEY2=${DOCSTRANGE_API_KEY2}
+      - MONTHLY_REQUEST_LIMIT=10000
+      - DOCSTRANGE_API_URL=https://api.docstrange.com/v1/ocr
+      - REQUEST_TIMEOUT=60
+    depends_on:
+      db:
+        condition: service_healthy
     volumes:
-      - ./uploads:/tmp   # for storing temp files
+      - ./uploads:/app/uploads  # Optional: for file uploads
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=docprocessor_db
+      - POSTGRES_USER=docprocessor
+      - POSTGRES_PASSWORD=woodland123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"  # Optional: expose for external access
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docprocessor -d docprocessor_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # Optional: Database admin interface
+
+volumes:
+  postgres_data:
+  redis_data:
