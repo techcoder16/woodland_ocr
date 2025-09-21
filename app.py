@@ -19,8 +19,6 @@ app = FastAPI(title="Document Processing API", version="1.0.0")
 # -----------------------------
 # Database Models
 # -----------------------------
-Base = declarative_base()
-
 
 # -----------------------------
 # Database Setup
