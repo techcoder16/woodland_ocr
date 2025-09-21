@@ -2,8 +2,8 @@
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
-
-Base = declarative_base()
+from database import engine
+from database import Base
 
 
 class ProcessedDocument(Base):
