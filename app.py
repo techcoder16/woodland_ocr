@@ -10,6 +10,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import logging
 from config import config
+
 from models import ProcessedDocument, APIUsage
 from database import SessionLocal, engine
 from pydantic import BaseModel
@@ -24,8 +25,6 @@ app = FastAPI(title="Document Processing API", version="1.0.0")
 # -----------------------------
 # Database Models
 # -----------------------------
-Base = declarative_base()
-
 
 # -----------------------------
 # Database Setup

@@ -12,3 +12,4 @@ class Config:
     REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60"))
 
 config = Config()
+print(config.API_KEYS)  # Debugging line to check if keys are loaded correctly
