@@ -4,7 +4,7 @@ services:
   app:
     build: .
     ports:
-      - "8000:8000"
+      - "5006:5006"
     environment:
       - DATABASE_URL=sqlite:///./document_processor.db  # Using SQLite for simplicity
       - DOCSTRANGE_API_KEY=${DOCSTRANGE_API_KEY1}  # Only one API key needed
