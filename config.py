@@ -1,5 +1,8 @@
 import os
-os.load.dotenv()
+from dotenv import load_dotenv  # <-- make sure python-dotenv is installed
+
+load_dotenv()
+
 class Config:
     API_KEYS = [
         os.getenv("DOCSTRANGE_API_KEY1"),
