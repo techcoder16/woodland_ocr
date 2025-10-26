@@ -170,7 +170,7 @@ def extract_transaction_data(ocr_content):
                 'error': f'API returned status {resp.status_code}: {resp.text}'
             }
         
-        js = resp.json()+
+        js = resp.json()
         
         if js.get('status') == 'success':
             response_text = js.get('response', '')
