@@ -1,10 +1,13 @@
 import hashlib
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import requests
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from pdf2image import convert_from_bytes
+from PIL import Image
+import io
 # from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, Boolean
 # from sqlalchemy.ext.declarative import declarative_base
 # from sqlalchemy.orm import sessionmaker, Session
@@ -41,6 +44,84 @@ def hash_image(image_bytes: bytes) -> str:
 def get_current_month() -> str:
     """Get current month in YYYY-MM format."""
     return datetime.now().strftime("%Y-%m")
+
+def convert_pdf_to_images(pdf_bytes: bytes) -> List[bytes]:
+    """Convert PDF to images for better OCR processing."""
+    try:
+        logger.info("Converting PDF to images...")
+        
+        # Convert PDF to images
+        images = convert_from_bytes(
+            pdf_bytes,
+            dpi=300,  # High DPI for better OCR quality
+            first_page=1,
+            last_page=None,  # Convert all pages
+            fmt='PNG'
+        )
+        
+        image_bytes_list = []
+        for i, image in enumerate(images):
+            # Convert PIL Image to bytes
+            img_buffer = io.BytesIO()
+            image.save(img_buffer, format='PNG', optimize=True)
+            img_bytes = img_buffer.getvalue()
+            image_bytes_list.append(img_bytes)
+            
+            logger.info(f"Converted page {i+1} to image ({len(img_bytes)} bytes)")
+        
+        logger.info(f"Successfully converted PDF to {len(image_bytes_list)} images")
+        return image_bytes_list
+        
+    except Exception as e:
+        logger.error(f"Error converting PDF to images: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"PDF conversion failed: {str(e)}")
+
+def process_file_with_images(file_bytes: bytes, filename: str, api_key: str) -> Dict[str, Any]:
+    """Process file, converting PDF to images if needed."""
+    file_extension = filename.lower().split('.')[-1]
+    
+    if file_extension == 'pdf':
+        logger.info("PDF detected, converting to images first...")
+        images = convert_pdf_to_images(file_bytes)
+        
+        # Process each image with OCR
+        all_results = []
+        for i, image_bytes in enumerate(images):
+            logger.info(f"Processing image {i+1}/{len(images)}...")
+            result = call_docstrange(api_key, image_bytes, "Extract all text and data from this document")
+            if result:
+                result['page_number'] = i + 1
+                all_results.append(result)
+        
+        # Combine results from all pages
+        if all_results:
+            combined_result = {
+                'success': True,
+                'content': '',
+                'format': 'combined',
+                'file_type': 'pdf',
+                'pages_processed': len(all_results),
+                'processing_time': sum(r.get('processing_time', 0) for r in all_results),
+                'record_id': all_results[0].get('record_id'),
+                'processing_status': 'completed',
+                'multiple_outputs': True
+            }
+            
+            # Combine content from all pages
+            combined_content = []
+            for result in all_results:
+                if result.get('content'):
+                    combined_content.append(f"--- Page {result.get('page_number', 'Unknown')} ---\n{result['content']}")
+            
+            combined_result['content'] = '\n\n'.join(combined_content)
+            return combined_result
+        else:
+            return {'success': False, 'error': 'No pages could be processed'}
+    
+    else:
+        # For non-PDF files, process directly
+        logger.info(f"Processing {file_extension} file directly...")
+        return call_docstrange(api_key, file_bytes, "Extract all text and data from this document")
 
 # def get_or_create_usage_record(db: Session, key_name: str, month: str) -> APIUsage:
 #     """Get or create usage record for API key and month."""
@@ -562,7 +643,7 @@ async def process_docs(
     Process document with OCR and optional custom prompting.
     
     Parameters:
-    - file: Image file to process
+    - file: Document file to process (PDF, PNG, JPG, etc.)
     - prompt_type: One of the predefined prompt types (see /prompts endpoint)
     - custom_prompt: Custom prompt to override prompt_type
     - extract_transaction: If True, extract structured transaction data using LLM
@@ -571,13 +652,13 @@ async def process_docs(
     if not config.API_KEYS:
         raise HTTPException(status_code=500, detail="No API keys configured")
     
-    # Read and hash image
+    # Read file
     try:
-        image_bytes = await file.read()
+        file_bytes = await file.read()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
     
-    img_hash = hash_image(image_bytes)
+    img_hash = hash_image(file_bytes)
     
     # Determine prompt to use
     if custom_prompt:
@@ -598,11 +679,11 @@ async def process_docs(
     for i, api_key in enumerate(config.API_KEYS, 1):
         key_name = f"api_key_{i}"
         
-        # Make API call
+        # Process file (with PDF to image conversion if needed)
         logger.info(f"Trying {key_name}")
-        result = call_docstrange(api_key, image_bytes, final_prompt)
+        result = process_file_with_images(file_bytes, file.filename, api_key)
         
-        if result:
+        if result and result.get('success'):
             used_key_name = key_name
             logger.info(f"Successfully processed with {key_name}")
             break
@@ -659,31 +740,31 @@ async def extract_transaction_from_ocr(
     file: UploadFile
 ):
     """
-    Extract structured transaction data from document image.
-    This endpoint processes the image with OCR and then extracts transaction data.
+    Extract structured transaction data from document.
+    This endpoint processes the document (PDF, PNG, JPG, etc.) with OCR and then extracts transaction data.
     """
     # Validate API keys
     if not config.API_KEYS:
         raise HTTPException(status_code=500, detail="No API keys configured")
     
-    # Read and hash image
+    # Read file
     try:
-        image_bytes = await file.read()
+        file_bytes = await file.read()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
     
-    img_hash = hash_image(image_bytes)
+    img_hash = hash_image(file_bytes)
     
-    # Process with OCR first
+    # Process with OCR first (with PDF to image conversion if needed)
     result = None
     used_key_name = None
     
     for i, api_key in enumerate(config.API_KEYS, 1):
         key_name = f"api_key_{i}"
         
-        # Make API call
+        # Process file (with PDF to image conversion if needed)
         logger.info(f"Trying {key_name} for OCR")
-        result = call_docstrange(api_key, image_bytes, "Extract all text and tables from this document")
+        result = process_file_with_images(file_bytes, file.filename, api_key)
         
         if result:
             used_key_name = key_name
