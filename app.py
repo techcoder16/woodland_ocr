@@ -176,8 +176,8 @@ def extract_transaction_data(ocr_content):
         resp = requests.post(url, headers=headers, json=data, timeout=90)  # 90 seconds timeout
         
         if resp.status_code != 200:
-            if resp.status_code == 403:
-                logger.warning("LLM API blocked by Cloudflare, using fallback extraction")
+            if resp.status_code in [403, 500, 502, 503, 504]:
+                logger.warning(f"LLM API returned status {resp.status_code}, using fallback extraction")
                 return extract_basic_transaction_data(ocr_content)
             else:
                 return {
@@ -254,25 +254,46 @@ def extract_basic_transaction_data(ocr_content):
     }
     
     try:
-        # Extract monetary amounts
-        money_pattern = r'[£$€]\s*(\d+(?:\.\d{2})?)'
-        amounts = re.findall(money_pattern, ocr_content)
+        logger.info("Using fallback extraction method")
+        
+        # Extract monetary amounts - improved pattern
+        money_patterns = [
+            r'[£$€]\s*(\d+(?:\.\d{2})?)',  # £50.00
+            r'(\d+(?:\.\d{2})?)\s*[£$€]',  # 50.00£
+            r'Amount[^£]*[£$€]\s*(\d+(?:\.\d{2})?)',  # Amount exclusive of VAT £50.00
+        ]
+        
+        amounts = []
+        for pattern in money_patterns:
+            matches = re.findall(pattern, ocr_content, re.IGNORECASE)
+            amounts.extend(matches)
+        
         if amounts:
             # Convert to float and use the largest amount as rent received
             amounts_float = [float(amount) for amount in amounts]
             result["toLandlordRentReceived"] = max(amounts_float)
+            logger.info(f"Extracted amounts: {amounts_float}, using {max(amounts_float)} as rent received")
         
-        # Extract dates
+        # Extract dates - improved patterns
         date_patterns = [
+            r'Invoice\s+Date\s+(\d+)',  # Invoice Date 062
             r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})',  # DD/MM/YYYY or DD-MM-YYYY
             r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',  # YYYY/MM/DD or YYYY-MM-DD
+            r'Date[:\s]*(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})',  # Date: DD/MM/YYYY
         ]
         
         for pattern in date_patterns:
-            dates = re.findall(pattern, ocr_content)
+            dates = re.findall(pattern, ocr_content, re.IGNORECASE)
             if dates:
                 try:
-                    if len(dates[0]) == 3:
+                    if len(dates[0]) == 1:  # Invoice Date 062 format
+                        day = dates[0]
+                        # Assume current year and month for day-only dates
+                        current_date = datetime.now()
+                        result["toLandlordDate"] = f"{current_date.year}-{current_date.month:02d}-{day.zfill(2)}"
+                        logger.info(f"Extracted date from day-only format: {result['toLandlordDate']}")
+                        break
+                    elif len(dates[0]) == 3:
                         if len(dates[0][2]) == 4:  # Full year
                             if len(dates[0][0]) == 4:  # YYYY/MM/DD
                                 year, month, day = dates[0]
@@ -283,22 +304,58 @@ def extract_basic_transaction_data(ocr_content):
                             year = f"20{year}" if int(year) < 50 else f"19{year}"
                         
                         result["toLandlordDate"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                        logger.info(f"Extracted date: {result['toLandlordDate']}")
                         break
-                except:
+                except Exception as e:
+                    logger.warning(f"Date extraction failed for pattern {pattern}: {e}")
                     continue
         
-        # Extract description from the content
+        # Extract description from the content - improved
         lines = ocr_content.split('\n')
+        description_keywords = ['descaling', 'heating', 'hot water', 'maintenance', 'repair', 'problem', 'working']
+        
         for line in lines:
-            if any(keyword in line.lower() for keyword in ['descaling', 'heating', 'hot water', 'maintenance', 'repair']):
-                result["toLandlordExpenditureDescription"] = line.strip()
+            line_lower = line.lower()
+            if any(keyword in line_lower for keyword in description_keywords):
+                # Clean up the description
+                description = line.strip()
+                # Remove HTML tags if present
+                description = re.sub(r'<[^>]+>', ' ', description)
+                # Clean up extra spaces
+                description = re.sub(r'\s+', ' ', description).strip()
+                result["toLandlordExpenditureDescription"] = description
+                logger.info(f"Extracted description: {description}")
                 break
         
-        # Look for VAT information
-        vat_pattern = r'VAT[:\s]*[£$€]?\s*(\d+(?:\.\d{2})?)'
-        vat_match = re.search(vat_pattern, ocr_content, re.IGNORECASE)
-        if vat_match:
-            result["toLandlordLessVAT"] = float(vat_match.group(1))
+        # Look for VAT information - improved
+        vat_patterns = [
+            r'VAT[:\s]*[£$€]?\s*(\d+(?:\.\d{2})?)',
+            r'(\d+(?:\.\d{2})?)\s*[£$€]?\s*VAT',
+            r'VAT\s+NET[:\s]*[£$€]?\s*(\d+(?:\.\d{2})?)',
+        ]
+        
+        for pattern in vat_patterns:
+            vat_match = re.search(pattern, ocr_content, re.IGNORECASE)
+            if vat_match:
+                result["toLandlordLessVAT"] = float(vat_match.group(1))
+                logger.info(f"Extracted VAT: {result['toLandlordLessVAT']}")
+                break
+        
+        # Set payment mode based on content
+        if 'cheque' in ocr_content.lower():
+            result["toLandLordMode"] = "cheque"
+        elif 'bank' in ocr_content.lower():
+            result["toLandLordMode"] = "bank transfer"
+        elif 'cash' in ocr_content.lower():
+            result["toLandLordMode"] = "cash"
+        else:
+            result["toLandLordMode"] = "unknown"
+        
+        # Set net received as the same as rent received for now
+        if result["toLandlordRentReceived"]:
+            result["toLandlordNetReceived"] = result["toLandlordRentReceived"]
+        
+        logger.info(f"Fallback extraction completed. Extracted data: {[k for k, v in result.items() if v is not None]}")
         
         return {
             'success': True,
@@ -308,6 +365,7 @@ def extract_basic_transaction_data(ocr_content):
         }
         
     except Exception as e:
+        logger.error(f"Basic extraction failed: {str(e)}")
         return {
             'success': False,
             'error': f'Basic extraction failed: {str(e)}'
