@@ -148,9 +148,20 @@ Return only the JSON object."""
 
 def extract_transaction_data(ocr_content):
     """Extract transaction data using LLM."""
+    import time
+    time.sleep(1)  # Add 1 second delay to avoid rate limiting
+    
     url = "https://apifreellm.com/api/chat"
     headers = {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site"
     }
     
     # Create the extraction prompt
@@ -165,10 +176,14 @@ def extract_transaction_data(ocr_content):
         resp = requests.post(url, headers=headers, json=data, timeout=90)  # 90 seconds timeout
         
         if resp.status_code != 200:
-            return {
-                'success': False,
-                'error': f'API returned status {resp.status_code}: {resp.text}'
-            }
+            if resp.status_code == 403:
+                logger.warning("LLM API blocked by Cloudflare, using fallback extraction")
+                return extract_basic_transaction_data(ocr_content)
+            else:
+                return {
+                    'success': False,
+                    'error': f'API returned status {resp.status_code}: {resp.text[:200]}...'
+                }
         
         js = resp.json()
         
