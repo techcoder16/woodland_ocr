@@ -122,16 +122,13 @@ def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[d
 
 def create_transaction_extraction_prompt(ocr_content):
     """Create a prompt for extracting transaction data from OCR content."""
-    return f"""
-You are a financial data extraction specialist. Extract transaction data from the following OCR content and return it as a JSON object matching the Transaction model structure.
-
-Focus on extracting "toLandlord" fields from invoice/receipt data. Here's the expected JSON structure:
+    return f"""Extract transaction data from this invoice and return as JSON:
 
 {{
   "toLandlordDate": "YYYY-MM-DD or null",
-  "toLandLordMode": "string or null",
+  "toLandLordMode": "string or null", 
   "toLandlordRentReceived": "float or null",
-  "toLandlordLessManagementFees": "float or null", 
+  "toLandlordLessManagementFees": "float or null",
   "toLandlordLessBuildingExpenditure": "float or null",
   "toLandlordLessBuildingExpenditureActual": "float or null",
   "toLandlordLessBuildingExpenditureDifference": "float or null",
@@ -144,21 +141,10 @@ Focus on extracting "toLandlord" fields from invoice/receipt data. Here's the ex
   "toLandlordNetReceived": "float or null"
 }}
 
-Extraction Guidelines:
-1. Look for dates in various formats (DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, etc.)
-2. Extract monetary amounts (look for £, $, € symbols and decimal numbers)
-3. Identify VAT amounts and calculations
-4. Find payment methods (cheque, bank transfer, cash, etc.)
-5. Extract descriptions of services/expenditures
-6. Look for cheque numbers or reference numbers
-7. Identify who made the payment
-8. Calculate net amounts when possible
-
-OCR Content to analyze:
+Invoice content:
 {ocr_content}
 
-Return ONLY the JSON object, no additional text or explanations.
-"""
+Return only the JSON object."""
 
 def extract_transaction_data(ocr_content):
     """Extract transaction data using LLM."""
@@ -175,24 +161,40 @@ def extract_transaction_data(ocr_content):
     }
     print("Prompt being sent to LLM API:", prompt[:100] + "..." if len(prompt) > 100 else prompt)
     try:
-        resp = requests.post(url, headers=headers, json=data)
-        js = resp.json()
+        # Set a shorter timeout to avoid the 2-minute limit
+        resp = requests.post(url, headers=headers, json=data, timeout=90)  # 90 seconds timeout
+        
+        if resp.status_code != 200:
+            return {
+                'success': False,
+                'error': f'API returned status {resp.status_code}: {resp.text}'
+            }
+        
+        js = resp.json()+
         
         if js.get('status') == 'success':
+            response_text = js.get('response', '')
+            if not response_text.strip():
+                return {
+                    'success': False,
+                    'error': 'Empty response from LLM API',
+                    'raw_response': response_text
+                }
+            
             # Try to parse the JSON response
             import json
             try:
-                transaction_data = json.loads(js['response'])
+                transaction_data = json.loads(response_text)
                 return {
                     'success': True,
                     'data': transaction_data,
-                    'raw_response': js['response']
+                    'raw_response': response_text
                 }
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
                 return {
                     'success': False,
-                    'error': 'Failed to parse JSON response',
-                    'raw_response': js['response']
+                    'error': f'Failed to parse JSON response: {str(e)}',
+                    'raw_response': response_text
                 }
         else:
             return {
@@ -200,10 +202,100 @@ def extract_transaction_data(ocr_content):
                 'error': js.get('error', 'Unknown error'),
                 'status': js.get('status')
             }
+    except requests.exceptions.Timeout:
+        logger.warning("LLM API timed out, using fallback extraction")
+        return extract_basic_transaction_data(ocr_content)
+    except requests.exceptions.RequestException as e:
+        return {
+            'success': False,
+            'error': f'Request error: {str(e)}'
+        }
     except Exception as e:
         return {
             'success': False,
-            'error': str(e)
+            'error': f'Unexpected error: {str(e)}'
+        }
+
+def extract_basic_transaction_data(ocr_content):
+    """Fallback: Extract basic transaction data using simple pattern matching."""
+    import re
+    from datetime import datetime
+    
+    result = {
+        "toLandlordDate": None,
+        "toLandLordMode": None,
+        "toLandlordRentReceived": None,
+        "toLandlordLessManagementFees": None,
+        "toLandlordLessBuildingExpenditure": None,
+        "toLandlordLessBuildingExpenditureActual": None,
+        "toLandlordLessBuildingExpenditureDifference": None,
+        "toLandlordNetPaid": None,
+        "toLandlordLessVAT": None,
+        "toLandlordChequeNo": None,
+        "toLandlordExpenditureDescription": None,
+        "toLandlordPaidBy": None,
+        "toLandlordDefaultExpenditure": None,
+        "toLandlordNetReceived": None
+    }
+    
+    try:
+        # Extract monetary amounts
+        money_pattern = r'[£$€]\s*(\d+(?:\.\d{2})?)'
+        amounts = re.findall(money_pattern, ocr_content)
+        if amounts:
+            # Convert to float and use the largest amount as rent received
+            amounts_float = [float(amount) for amount in amounts]
+            result["toLandlordRentReceived"] = max(amounts_float)
+        
+        # Extract dates
+        date_patterns = [
+            r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})',  # DD/MM/YYYY or DD-MM-YYYY
+            r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',  # YYYY/MM/DD or YYYY-MM-DD
+        ]
+        
+        for pattern in date_patterns:
+            dates = re.findall(pattern, ocr_content)
+            if dates:
+                try:
+                    if len(dates[0]) == 3:
+                        if len(dates[0][2]) == 4:  # Full year
+                            if len(dates[0][0]) == 4:  # YYYY/MM/DD
+                                year, month, day = dates[0]
+                            else:  # DD/MM/YYYY
+                                day, month, year = dates[0]
+                        else:  # 2-digit year
+                            day, month, year = dates[0]
+                            year = f"20{year}" if int(year) < 50 else f"19{year}"
+                        
+                        result["toLandlordDate"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                        break
+                except:
+                    continue
+        
+        # Extract description from the content
+        lines = ocr_content.split('\n')
+        for line in lines:
+            if any(keyword in line.lower() for keyword in ['descaling', 'heating', 'hot water', 'maintenance', 'repair']):
+                result["toLandlordExpenditureDescription"] = line.strip()
+                break
+        
+        # Look for VAT information
+        vat_pattern = r'VAT[:\s]*[£$€]?\s*(\d+(?:\.\d{2})?)'
+        vat_match = re.search(vat_pattern, ocr_content, re.IGNORECASE)
+        if vat_match:
+            result["toLandlordLessVAT"] = float(vat_match.group(1))
+        
+        return {
+            'success': True,
+            'data': result,
+            'raw_response': 'Basic extraction fallback used',
+            'fallback': True
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'Basic extraction failed: {str(e)}'
         }
 
 # -----------------------------
