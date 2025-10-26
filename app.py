@@ -206,30 +206,21 @@ def extract_transaction_data(ocr_content):
                     'raw_response': response_text
                 }
             except json.JSONDecodeError as e:
-                return {
-                    'success': False,
-                    'error': f'Failed to parse JSON response: {str(e)}',
-                    'raw_response': response_text
-                }
+                logger.warning(f"LLM API returned invalid JSON, using fallback extraction. Error: {str(e)}")
+                logger.warning(f"Raw response: {response_text[:200]}...")
+                return extract_basic_transaction_data(ocr_content)
         else:
-            return {
-                'success': False,
-                'error': js.get('error', 'Unknown error'),
-                'status': js.get('status')
-            }
+            logger.warning(f"LLM API returned error status: {js.get('status')}, using fallback extraction")
+            return extract_basic_transaction_data(ocr_content)
     except requests.exceptions.Timeout:
         logger.warning("LLM API timed out, using fallback extraction")
         return extract_basic_transaction_data(ocr_content)
     except requests.exceptions.RequestException as e:
-        return {
-            'success': False,
-            'error': f'Request error: {str(e)}'
-        }
+        logger.warning(f"LLM API request failed: {str(e)}, using fallback extraction")
+        return extract_basic_transaction_data(ocr_content)
     except Exception as e:
-        return {
-            'success': False,
-            'error': f'Unexpected error: {str(e)}'
-        }
+        logger.warning(f"Unexpected error in LLM API: {str(e)}, using fallback extraction")
+        return extract_basic_transaction_data(ocr_content)
 
 def extract_basic_transaction_data(ocr_content):
     """Fallback: Extract basic transaction data using simple pattern matching."""
