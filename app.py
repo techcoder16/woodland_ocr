@@ -99,7 +99,7 @@ def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[d
     files = {"file": ("upload.png", image_bytes, "*")}
 
     data = {"output_type": "flat-json"}
-    print("Prompt being sent to API:", api_key)  # Debugging line
+    print("API key being used:", api_key[:10] + "...")  # Debugging line
     try:
         response = requests.post(
             url=config.DOCSTRANGE_API_URL,
@@ -109,7 +109,9 @@ def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[d
         )
         
         if response.status_code == 200:
-            return response.json()
+            result = response.json()
+            logger.info(f"OCR API response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+            return result
         else:
             logger.error(f"API request failed with status {response.status_code}: {response.text}")
             return None
@@ -171,7 +173,7 @@ def extract_transaction_data(ocr_content):
     data = {
         "message": prompt
     }
-    print("Prompt being sent to API:", prompt)
+    print("Prompt being sent to LLM API:", prompt[:100] + "..." if len(prompt) > 100 else prompt)
     try:
         resp = requests.post(url, headers=headers, json=data)
         js = resp.json()
@@ -389,7 +391,30 @@ async def extract_transaction_from_ocr(
     
     # Extract transaction data
     logger.info("Extracting transaction data from OCR content")
-    transaction_result = extract_transaction_data(result['content'])
+    logger.info(f"OCR result structure: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+    logger.info(f"Looking for 'content' field in result: {'content' in result if isinstance(result, dict) else 'Result is not a dict'}")
+    
+    # Check if 'content' field exists, otherwise try other common field names
+    ocr_content = None
+    if isinstance(result, dict):
+        if 'content' in result:
+            ocr_content = result['content']
+        elif 'text' in result:
+            ocr_content = result['text']
+        elif 'data' in result:
+            ocr_content = result['data']
+        else:
+            # If no standard field, use the whole result as string
+            ocr_content = str(result)
+    
+    if not ocr_content:
+        raise HTTPException(
+            status_code=500,
+            detail="No OCR content found in API response"
+        )
+    
+    logger.info(f"OCR content preview: {str(ocr_content)[:200]}...")
+    transaction_result = extract_transaction_data(ocr_content)
     
     if not transaction_result['success']:
         raise HTTPException(
