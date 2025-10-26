@@ -73,50 +73,72 @@ def convert_pdf_to_images(pdf_bytes: bytes) -> List[bytes]:
         return image_bytes_list
         
     except Exception as e:
-        logger.error(f"Error converting PDF to images: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"PDF conversion failed: {str(e)}")
+        error_msg = str(e)
+        if "poppler" in error_msg.lower() or "page count" in error_msg.lower():
+            logger.error(f"Poppler not installed or not in PATH: {error_msg}")
+            raise HTTPException(
+                status_code=500, 
+                detail="PDF conversion requires poppler-utils to be installed. Please install it or use image files instead."
+            )
+        else:
+            logger.error(f"Error converting PDF to images: {error_msg}")
+            raise HTTPException(status_code=500, detail=f"PDF conversion failed: {error_msg}")
 
 def process_file_with_images(file_bytes: bytes, filename: str, api_key: str) -> Dict[str, Any]:
     """Process file, converting PDF to images if needed."""
     file_extension = filename.lower().split('.')[-1]
     
     if file_extension == 'pdf':
-        logger.info("PDF detected, converting to images first...")
-        images = convert_pdf_to_images(file_bytes)
-        
-        # Process each image with OCR
-        all_results = []
-        for i, image_bytes in enumerate(images):
-            logger.info(f"Processing image {i+1}/{len(images)}...")
-            result = call_docstrange(api_key, image_bytes, "Extract all text and data from this document")
-            if result:
-                result['page_number'] = i + 1
-                all_results.append(result)
-        
-        # Combine results from all pages
-        if all_results:
-            combined_result = {
-                'success': True,
-                'content': '',
-                'format': 'combined',
-                'file_type': 'pdf',
-                'pages_processed': len(all_results),
-                'processing_time': sum(r.get('processing_time', 0) for r in all_results),
-                'record_id': all_results[0].get('record_id'),
-                'processing_status': 'completed',
-                'multiple_outputs': True
-            }
+        try:
+            logger.info("PDF detected, converting to images first...")
+            images = convert_pdf_to_images(file_bytes)
             
-            # Combine content from all pages
-            combined_content = []
-            for result in all_results:
-                if result.get('content'):
-                    combined_content.append(f"--- Page {result.get('page_number', 'Unknown')} ---\n{result['content']}")
+            # Process each image with OCR
+            all_results = []
+            for i, image_bytes in enumerate(images):
+                logger.info(f"Processing image {i+1}/{len(images)}...")
+                result = call_docstrange(api_key, image_bytes, "Extract all text and data from this document")
+                if result:
+                    result['page_number'] = i + 1
+                    all_results.append(result)
             
-            combined_result['content'] = '\n\n'.join(combined_content)
-            return combined_result
-        else:
-            return {'success': False, 'error': 'No pages could be processed'}
+            # Combine results from all pages
+            if all_results:
+                combined_result = {
+                    'success': True,
+                    'content': '',
+                    'format': 'combined',
+                    'file_type': 'pdf',
+                    'pages_processed': len(all_results),
+                    'processing_time': sum(r.get('processing_time', 0) for r in all_results),
+                    'record_id': all_results[0].get('record_id'),
+                    'processing_status': 'completed',
+                    'multiple_outputs': True
+                }
+                
+                # Combine content from all pages
+                combined_content = []
+                for result in all_results:
+                    if result.get('content'):
+                        combined_content.append(f"--- Page {result.get('page_number', 'Unknown')} ---\n{result['content']}")
+                
+                combined_result['content'] = '\n\n'.join(combined_content)
+                return combined_result
+            else:
+                return {'success': False, 'error': 'No pages could be processed'}
+                
+        except HTTPException as e:
+            if "poppler" in str(e.detail).lower():
+                logger.warning("PDF to image conversion failed (poppler not available), trying direct PDF processing...")
+                # Fallback: try to process PDF directly
+                result = call_docstrange(api_key, file_bytes, "Extract all text and data from this PDF document")
+                if result:
+                    result['file_type'] = 'pdf'
+                    result['pages_processed'] = 1
+                    result['processing_note'] = 'Processed directly (no image conversion)'
+                return result
+            else:
+                raise e
     
     else:
         # For non-PDF files, process directly
@@ -378,8 +400,20 @@ def extract_basic_transaction_data(ocr_content):
         
         # Try to parse as JSON first (if OCR returned structured data)
         try:
-            if ocr_content.strip().startswith('{'):
-                data = json.loads(ocr_content)
+            # Clean up OCR content - remove page markers and extract JSON
+            cleaned_content = ocr_content.strip()
+            
+            # Remove page markers like "--- Page 1 ---\n"
+            if cleaned_content.startswith('--- Page'):
+                lines = cleaned_content.split('\n')
+                # Find the first line that starts with {
+                for line in lines:
+                    if line.strip().startswith('{'):
+                        cleaned_content = line.strip()
+                        break
+            
+            if cleaned_content.startswith('{'):
+                data = json.loads(cleaned_content)
                 
                 # Extract from structured JSON
                 # Try different date field names
@@ -399,9 +433,14 @@ def extract_basic_transaction_data(ocr_content):
                         break
                 
                 # Try different total field names
-                total_fields = ['total', 'amount', 'total_amount', 'grand_total', 'sum', 'Total', 'Amount', 'TOTAL', 'AMOUNT', 'TotalAmount', 'GrandTotal', 'Subtotal']
+                total_fields = [
+                    'total', 'amount', 'total_amount', 'grand_total', 'sum', 
+                    'Total', 'Amount', 'TOTAL', 'AMOUNT', 'TotalAmount', 'GrandTotal', 'Subtotal',
+                    'item_amount_exclusive_of_vat_1', 'total_amount_exclusive_of_vat',
+                    'item_amount_1', 'amount_1', 'total_exclusive_of_vat'
+                ]
                 for field in total_fields:
-                    if field in data:
+                    if field in data and data[field] is not None:
                         result["toLandlordRentReceived"] = float(data[field])
                         break
                 
@@ -410,16 +449,23 @@ def extract_basic_transaction_data(ocr_content):
                     result["toLandlordNetReceived"] = result["toLandlordRentReceived"]
                 
                 # Try different tax field names
-                tax_fields = ['sales_tax', 'tax', 'vat', 'VAT', 'tax_amount']
+                tax_fields = [
+                    'sales_tax', 'tax', 'vat', 'VAT', 'tax_amount', 'vat_total',
+                    'item_vat_net_1', 'vat_net', 'VAT_net', 'total_vat'
+                ]
                 for field in tax_fields:
-                    if field in data:
+                    if field in data and data[field] is not None:
                         result["toLandlordLessVAT"] = float(data[field])
                         break
                 
                 # Try different name field names
-                name_fields = ['bill_to_name', 'customer_name', 'client_name', 'name', 'billToName', 'CustomerName', 'customerName', 'CUSTOMER_NAME']
+                name_fields = [
+                    'bill_to_name', 'customer_name', 'client_name', 'name', 'billToName', 
+                    'CustomerName', 'customerName', 'CUSTOMER_NAME', 'from_name', 'FromName',
+                    'company_name', 'CompanyName', 'vendor_name', 'VendorName'
+                ]
                 for field in name_fields:
-                    if field in data:
+                    if field in data and data[field]:
                         result["toLandlordPaidBy"] = data[field]
                         break
                 
@@ -429,6 +475,12 @@ def extract_basic_transaction_data(ocr_content):
                 # Pattern 1: Item1Description, Item2Description, etc. (your format)
                 for i in range(1, 10):
                     item_key = f'Item{i}Description'
+                    if item_key in data and data[item_key]:
+                        descriptions.append(data[item_key])
+                
+                # Pattern 1.5: item_description_1, item_description_2, etc.
+                for i in range(1, 10):
+                    item_key = f'item_description_{i}'
                     if item_key in data and data[item_key]:
                         descriptions.append(data[item_key])
                 
