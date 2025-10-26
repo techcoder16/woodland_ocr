@@ -95,47 +95,121 @@
 
 # print(tess_text)
 
-import json
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Load a small free model (Phi-2 here)
-model_name = "microsoft/phi-2"
-
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    device_map="cpu",  # CPU only
-    torch_dtype="auto"
-)
-
-def run_llm_on_ocr(ocr_json: dict, prompt: str) -> str:
-    """Run Hugging Face model on OCR JSON with a prompt."""
-    input_text = f"""
-    OCR JSON:
-    {json.dumps(ocr_json, indent=2)}
-
-    Task:
-    {prompt}
-    """
-
-    inputs = tokenizer(input_text, return_tensors="pt")
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=300,
-        do_sample=True,
-        temperature=0.3,
-        top_p=0.9
-    )
-
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+import requests
 
 
-ocr_result =   {'success': True, 'content': 'Invoice Date 062\n\nFrom Dreams Creation Ltd\nBanking 10900\nVAT Reg\'d No.\n\nTo\n18 MAID Road\n\n<table>\n<thead>\n<tr>\n<td></td>\n<td></td>\n<td>Amount<br>exclusive of<br>VAT</td>\n<td>VAT<br>NET</td>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td></td>\n<td>Hot water not working and heating problem Descaling</td>\n<td>£50.00</td>\n<td>£</td>\n</tr>\n<tr>\n<td colspan="3"></td>\n<td>£50.00</td>\n<td></td>\n</tr>\n</tbody>\n</table>\n\nVAT\nTOTAL', 'format': 'markdown', 'file_type': 'unknown -> image', 'pages_processed': 1, 'processing_time': 6.311602354049683, 'record_id': 99654, 'processing_status': 'completed'}
 
+# Transaction data extraction prompt
+def create_transaction_extraction_prompt(ocr_content):
+    return f"""
+You are a financial data extraction specialist. Extract transaction data from the following OCR content and return it as a JSON object matching the Transaction model structure.
 
-if ocr_result:
-    structured_data = run_llm_on_ocr(
-        ocr_result,
-        "Extract only the invoice number, total amount, and date in JSON format."
-    )
-    print(structured_data)
+Focus on extracting "toLandlord" fields from invoice/receipt data. Here's the expected JSON structure:
+
+{{
+  "toLandlordDate": "YYYY-MM-DD or null",
+  "toLandLordMode": "string or null",
+  "toLandlordRentReceived": "float or null",
+  "toLandlordLessManagementFees": "float or null", 
+  "toLandlordLessBuildingExpenditure": "float or null",
+  "toLandlordLessBuildingExpenditureActual": "float or null",
+  "toLandlordLessBuildingExpenditureDifference": "float or null",
+  "toLandlordNetPaid": "float or null",
+  "toLandlordLessVAT": "float or null",
+  "toLandlordChequeNo": "string or null",
+  "toLandlordExpenditureDescription": "string or null",
+  "toLandlordPaidBy": "string or null",
+  "toLandlordDefaultExpenditure": "string or null",
+  "toLandlordNetReceived": "float or null"
+}}
+
+Extraction Guidelines:
+1. Look for dates in various formats (DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, etc.)
+2. Extract monetary amounts (look for £, $, € symbols and decimal numbers)
+3. Identify VAT amounts and calculations
+4. Find payment methods (cheque, bank transfer, cash, etc.)
+5. Extract descriptions of services/expenditures
+6. Look for cheque numbers or reference numbers
+7. Identify who made the payment
+8. Calculate net amounts when possible
+
+OCR Content to analyze:
+{ocr_content}
+
+Return ONLY the JSON object, no additional text or explanations.
+"""
+
+# Sample OCR result (replace with actual OCR data from your API)
+ocr_result = {
+    'success': True, 
+    'content': 'Invoice Date 062\n\nFrom Dreams Creation Ltd\nBanking 10900\nVAT Reg\'d No.\n\nTo\n18 MAID Road\n\n<table>\n<thead>\n<tr>\n<td></td>\n<td></td>\n<td>Amount<br>exclusive of<br>VAT</td>\n<td>VAT<br>NET</td>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td></td>\n<td>Hot water not working and heating problem Descaling</td>\n<td>£50.00</td>\n<td>£</td>\n</tr>\n<tr>\n<td colspan="3"></td>\n<td>£50.00</td>\n<td></td>\n</tr>\n</tbody>\n</table>\n\nVAT\nTOTAL', 
+    'format': 'markdown', 
+    'file_type': 'unknown -> image', 
+    'pages_processed': 1, 
+    'processing_time': 6.311602354049683, 
+    'record_id': 99654, 
+    'processing_status': 'completed'
+}
+
+def extract_transaction_data(ocr_content):
+    """Extract transaction data using LLM"""
+    url = "https://apifreellm.com/api/chat"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    # Create the extraction prompt
+    prompt = create_transaction_extraction_prompt(ocr_content)
+    
+    data = {
+        "message": prompt
+    }
+    
+    try:
+        resp = requests.post(url, headers=headers, json=data)
+        js = resp.json()
+        
+        if js.get('status') == 'success':
+            # Try to parse the JSON response
+            import json
+            try:
+                transaction_data = json.loads(js['response'])
+                return {
+                    'success': True,
+                    'data': transaction_data,
+                    'raw_response': js['response']
+                }
+            except json.JSONDecodeError:
+                return {
+                    'success': False,
+                    'error': 'Failed to parse JSON response',
+                    'raw_response': js['response']
+                }
+        else:
+            return {
+                'success': False,
+                'error': js.get('error', 'Unknown error'),
+                'status': js.get('status')
+            }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+# Example usage
+if __name__ == "__main__":
+    # Extract transaction data from OCR result
+    result = extract_transaction_data(ocr_result['content'])
+    
+    if result['success']:
+        print("Transaction data extracted successfully:")
+        print(result['data'])
+    else:
+        print("Error extracting transaction data:")
+        print(result['error'])
+        if 'raw_response' in result:
+            print("Raw LLM response:")
+            print(result['raw_response'])
+  

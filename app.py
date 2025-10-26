@@ -5,48 +5,31 @@ from typing import Optional
 import requests
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+# from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, Boolean
+# from sqlalchemy.ext.declarative import declarative_base
+# from sqlalchemy.orm import sessionmaker, Session
 import logging
 from config import config
 
 from pydantic import BaseModel
-from database import Base
+# from database import Base
 
-from models import ProcessedDocument, APIUsage
-from database import SessionLocal, engine
+# from models import ProcessedDocument, APIUsage
+# from database import SessionLocal, engine
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-from pydantic_model import ProcessResponse
+# from pydantic_model import ProcessResponse
 app = FastAPI(title="Document Processing API", version="1.0.0")
-Base.metadata.create_all(bind=engine)
+# Base.metadata.create_all(bind=engine)
 
-# -----------------------------
-# Database Models
-# -----------------------------
-
-# -----------------------------
-# Database Setup
-# -----------------------------
-# -----------------------------
-# Configuration
-# -----------------------------
-
-# -----------------------------
-# Pydantic Models
-# -----------------------------
-# -----------------------------
-# Database Dependency
-# -----------------------------
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# def get_db():
+#     db = SessionLocal()
+#     try:
+#         yield db
+#     finally:
+#         db.close()
 
 # -----------------------------
 # Helper Functions
@@ -59,63 +42,63 @@ def get_current_month() -> str:
     """Get current month in YYYY-MM format."""
     return datetime.now().strftime("%Y-%m")
 
-def get_or_create_usage_record(db: Session, key_name: str, month: str) -> APIUsage:
-    """Get or create usage record for API key and month."""
-    usage = db.query(APIUsage).filter(
-        APIUsage.api_key_name == key_name,
-        APIUsage.month_year == month
-    ).first()
+# def get_or_create_usage_record(db: Session, key_name: str, month: str) -> APIUsage:
+#     """Get or create usage record for API key and month."""
+#     usage = db.query(APIUsage).filter(
+#         APIUsage.api_key_name == key_name,
+#         APIUsage.month_year == month
+#     ).first()
     
-    if not usage:
-        usage = APIUsage(
-            api_key_name=key_name,
-            month_year=month,
-            request_count=0
-        )
-        db.add(usage)
-        db.commit()
-        db.refresh(usage)
+#     if not usage:
+#         usage = APIUsage(
+#             api_key_name=key_name,
+#             month_year=month,
+#             request_count=0
+#         )
+#         db.add(usage)
+#         db.commit()
+#         db.refresh(usage)
     
-    return usage
+#     return usage
 
-def check_monthly_limit(db: Session, key_name: str) -> tuple[bool, int]:
-    """Check if API key is within monthly limit. Returns (can_use, current_count)."""
-    current_month = get_current_month()
-    usage = get_or_create_usage_record(db, key_name, current_month)
+# def check_monthly_limit(db: Session, key_name: str) -> tuple[bool, int]:
+#     """Check if API key is within monthly limit. Returns (can_use, current_count)."""
+#     current_month = get_current_month()
+#     usage = get_or_create_usage_record(db, key_name, current_month)
     
-    can_use = usage.request_count < config.MONTHLY_LIMIT
-    return can_use, usage.request_count
+#     can_use = usage.request_count < config.MONTHLY_LIMIT
+#     return can_use, usage.request_count
 
-def increment_usage(db: Session, key_name: str):
-    """Increment usage count for API key."""
-    current_month = get_current_month()
-    usage = get_or_create_usage_record(db, key_name, current_month)
-    usage.request_count += 1
-    usage.updated_at = datetime.utcnow()
-    db.commit()
+# def increment_usage(db: Session, key_name: str):
+#     """Increment usage count for API key."""
+#     current_month = get_current_month()
+#     usage = get_or_create_usage_record(db, key_name, current_month)
+#     usage.request_count += 1
+#     usage.updated_at = datetime.utcnow()
+#     db.commit()
 
-def get_usage_summary(db: Session) -> dict:
-    """Get usage summary for all API keys."""
-    current_month = get_current_month()
-    summary = {}
+# def get_usage_summary(db: Session) -> dict:
+#     """Get usage summary for all API keys."""
+#     current_month = get_current_month()
+#     summary = {}
     
-    for i, key in enumerate(config.API_KEYS, 1):
-        key_name = f"api_key_{i}"
-        can_use, current_count = check_monthly_limit(db, key_name)
-        summary[key_name] = {
-            "current_count": current_count,
-            "monthly_limit": config.MONTHLY_LIMIT,
-            "remaining": config.MONTHLY_LIMIT - current_count,
-            "can_use": can_use
-        }
+#     for i, key in enumerate(config.API_KEYS, 1):
+#         key_name = f"api_key_{i}"
+#         can_use, current_count = check_monthly_limit(db, key_name)
+#         summary[key_name] = {
+#             "current_count": current_count,
+#             "monthly_limit": config.MONTHLY_LIMIT,
+#             "remaining": config.MONTHLY_LIMIT - current_count,
+#             "can_use": can_use
+#         }
     
-    return summary
+#     return summary
 
 def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[dict]:
     """Make a request to Docstrange API with a prompt."""
     files = {"file": ("upload.png", image_bytes, "*")}
 
-    data = {"output_type": "json"}
+    data = {"output_type": "flat-json"}
     print("Prompt being sent to API:", api_key)  # Debugging line
     try:
         response = requests.post(
@@ -134,6 +117,92 @@ def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[d
     except requests.exceptions.RequestException as e:
         logger.error(f"API request exception: {str(e)}")
         return None
+
+def create_transaction_extraction_prompt(ocr_content):
+    """Create a prompt for extracting transaction data from OCR content."""
+    return f"""
+You are a financial data extraction specialist. Extract transaction data from the following OCR content and return it as a JSON object matching the Transaction model structure.
+
+Focus on extracting "toLandlord" fields from invoice/receipt data. Here's the expected JSON structure:
+
+{{
+  "toLandlordDate": "YYYY-MM-DD or null",
+  "toLandLordMode": "string or null",
+  "toLandlordRentReceived": "float or null",
+  "toLandlordLessManagementFees": "float or null", 
+  "toLandlordLessBuildingExpenditure": "float or null",
+  "toLandlordLessBuildingExpenditureActual": "float or null",
+  "toLandlordLessBuildingExpenditureDifference": "float or null",
+  "toLandlordNetPaid": "float or null",
+  "toLandlordLessVAT": "float or null",
+  "toLandlordChequeNo": "string or null",
+  "toLandlordExpenditureDescription": "string or null",
+  "toLandlordPaidBy": "string or null",
+  "toLandlordDefaultExpenditure": "string or null",
+  "toLandlordNetReceived": "float or null"
+}}
+
+Extraction Guidelines:
+1. Look for dates in various formats (DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, etc.)
+2. Extract monetary amounts (look for £, $, € symbols and decimal numbers)
+3. Identify VAT amounts and calculations
+4. Find payment methods (cheque, bank transfer, cash, etc.)
+5. Extract descriptions of services/expenditures
+6. Look for cheque numbers or reference numbers
+7. Identify who made the payment
+8. Calculate net amounts when possible
+
+OCR Content to analyze:
+{ocr_content}
+
+Return ONLY the JSON object, no additional text or explanations.
+"""
+
+def extract_transaction_data(ocr_content):
+    """Extract transaction data using LLM."""
+    url = "https://apifreellm.com/api/chat"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    # Create the extraction prompt
+    prompt = create_transaction_extraction_prompt(ocr_content)
+    
+    data = {
+        "message": prompt
+    }
+    print("Prompt being sent to API:", prompt)
+    try:
+        resp = requests.post(url, headers=headers, json=data)
+        js = resp.json()
+        
+        if js.get('status') == 'success':
+            # Try to parse the JSON response
+            import json
+            try:
+                transaction_data = json.loads(js['response'])
+                return {
+                    'success': True,
+                    'data': transaction_data,
+                    'raw_response': js['response']
+                }
+            except json.JSONDecodeError:
+                return {
+                    'success': False,
+                    'error': 'Failed to parse JSON response',
+                    'raw_response': js['response']
+                }
+        else:
+            return {
+                'success': False,
+                'error': js.get('error', 'Unknown error'),
+                'status': js.get('status')
+            }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
 # -----------------------------
 # Enhanced Prompts
@@ -166,17 +235,17 @@ async def get_available_prompts():
         "usage": "Use 'prompt_type' parameter with one of these keys, or provide custom 'prompt'"
     }
 
-@app.get("/usage")
-async def get_usage_stats(db: Session = Depends(get_db)):
-    """Get current API usage statistics."""
-    return get_usage_summary(db)
+# @app.get("/usage")
+# async def get_usage_stats(db: Session = Depends(get_db)):
+#     """Get current API usage statistics."""
+#     return get_usage_summary(db)
 
-@app.post("/process-docs", response_model=ProcessResponse)
+@app.post("/process-docs")
 async def process_docs(
     file: UploadFile,
     prompt_type: str = Form("default"),
     custom_prompt: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
+    extract_transaction: bool = Form(False)
 ):
     """
     Process document with OCR and optional custom prompting.
@@ -185,6 +254,7 @@ async def process_docs(
     - file: Image file to process
     - prompt_type: One of the predefined prompt types (see /prompts endpoint)
     - custom_prompt: Custom prompt to override prompt_type
+    - extract_transaction: If True, extract structured transaction data using LLM
     """
     # Validate API keys
     if not config.API_KEYS:
@@ -207,20 +277,8 @@ async def process_docs(
         final_prompt = PROMPTS["default"]
         logger.warning(f"Unknown prompt_type '{prompt_type}', using default")
     
-    # Check cache first
-    cached_doc = db.query(ProcessedDocument).filter(
-        ProcessedDocument.image_hash == img_hash,
-        ProcessedDocument.prompt == final_prompt
-    ).first()
-    
-    if cached_doc:
-        logger.info(f"Cache hit for image hash: {img_hash}")
-        return ProcessResponse(
-            cached=True,
-            result=eval(cached_doc.result),  # Convert string back to dict
-            usage=get_usage_summary(db),
-            message="Result retrieved from cache"
-        )
+    # Skip cache for now (database not available)
+    logger.info("Processing document without cache")
     
     # Try API keys in order
     result = None
@@ -229,31 +287,12 @@ async def process_docs(
     for i, api_key in enumerate(config.API_KEYS, 1):
         key_name = f"api_key_{i}"
         
-        # Check monthly limit
-        can_use, current_count = check_monthly_limit(db, key_name)
-        if not can_use:
-            logger.warning(f"{key_name} has reached monthly limit ({current_count}/{config.MONTHLY_LIMIT})")
-            continue
-        
         # Make API call
-        logger.info(f"Trying {key_name} (usage: {current_count}/{config.MONTHLY_LIMIT})")
+        logger.info(f"Trying {key_name}")
         result = call_docstrange(api_key, image_bytes, final_prompt)
         
         if result:
-            # Success - increment usage and cache result
-            increment_usage(db, key_name)
             used_key_name = key_name
-            
-            # Cache the result
-            cached_doc = ProcessedDocument(
-                image_hash=img_hash,
-                prompt=final_prompt,
-                result=str(result),  # Store as string in DB
-                file_name=file.filename or "unknown"
-            )
-            db.add(cached_doc)
-            db.commit()
-            
             logger.info(f"Successfully processed with {key_name}")
             break
         else:
@@ -262,32 +301,109 @@ async def process_docs(
     if not result:
         raise HTTPException(
             status_code=503, 
-            detail="All API keys failed or reached monthly limits"
+            detail="All API keys failed"
         )
     
-    return ProcessResponse(
-        cached=False,
-        result=result,
-        usage=get_usage_summary(db),
-        used_key=used_key_name,
-        message="Document processed successfully"
-    )
-
-@app.delete("/cache/clear")
-async def clear_cache(db: Session = Depends(get_db)):
-    """Clear all cached documents."""
-    count = db.query(ProcessedDocument).count()
-    db.query(ProcessedDocument).delete()
-    db.commit()
-    return {"message": f"Cleared {count} cached documents"}
-
-@app.get("/cache/stats")
-async def cache_stats(db: Session = Depends(get_db)):
-    """Get cache statistics."""
-    total_docs = db.query(ProcessedDocument).count()
+    # Extract transaction data if requested
+    transaction_data = None
+    if extract_transaction and 'content' in result:
+        logger.info("Extracting transaction data from OCR content")
+        transaction_result = extract_transaction_data(result['content'])
+        if transaction_result['success']:
+            transaction_data = transaction_result['data']
+            logger.info("Transaction data extracted successfully")
+        else:
+            logger.warning(f"Failed to extract transaction data: {transaction_result['error']}")
+    
+    # Add transaction data to result if available
+    if transaction_data:
+        result['transaction_data'] = transaction_data
+    
     return {
-        "total_cached_documents": total_docs,
-        "cache_size": f"{total_docs} documents"
+        "cached": False,
+        "result": result,
+        "used_key": used_key_name,
+        "message": "Document processed successfully"
+    }
+
+# @app.delete("/cache/clear")
+# async def clear_cache(db: Session = Depends(get_db)):
+#     """Clear all cached documents."""
+#     count = db.query(ProcessedDocument).count()
+#     db.query(ProcessedDocument).delete()
+#     db.commit()
+#     return {"message": f"Cleared {count} cached documents"}
+
+# @app.get("/cache/stats")
+# async def cache_stats(db: Session = Depends(get_db)):
+#     """Get cache statistics."""
+#     total_docs = db.query(ProcessedDocument).count()
+#     return {
+#         "total_cached_documents": total_docs,
+#         "cache_size": f"{total_docs} documents"
+#     }
+
+@app.post("/extract-transaction")
+async def extract_transaction_from_ocr(
+    file: UploadFile
+):
+    """
+    Extract structured transaction data from document image.
+    This endpoint processes the image with OCR and then extracts transaction data.
+    """
+    # Validate API keys
+    if not config.API_KEYS:
+        raise HTTPException(status_code=500, detail="No API keys configured")
+    
+    # Read and hash image
+    try:
+        image_bytes = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+    
+    img_hash = hash_image(image_bytes)
+    
+    # Process with OCR first
+    result = None
+    used_key_name = None
+    
+    for i, api_key in enumerate(config.API_KEYS, 1):
+        key_name = f"api_key_{i}"
+        
+        # Make API call
+        logger.info(f"Trying {key_name} for OCR")
+        result = call_docstrange(api_key, image_bytes, "Extract all text and tables from this document")
+        
+        if result:
+            used_key_name = key_name
+            logger.info(f"OCR completed with {key_name}")
+            break
+        else:
+            logger.warning(f"{key_name} failed OCR processing")
+    
+    if not result or 'content' not in result:
+        raise HTTPException(
+            status_code=503, 
+            detail="OCR processing failed with all API keys"
+        )
+    
+    # Extract transaction data
+    logger.info("Extracting transaction data from OCR content")
+    transaction_result = extract_transaction_data(result['content'])
+    
+    if not transaction_result['success']:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Transaction extraction failed: {transaction_result['error']}"
+        )
+    
+    return {
+        "success": True,
+        "transaction_data": transaction_result['data'],
+        "ocr_content": result['content'],
+        "used_key": used_key_name,
+        "cached": False,
+        "message": "Transaction data extracted successfully"
     }
 
 if __name__ == "__main__":
