@@ -107,7 +107,7 @@ def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[d
             files=files,
             data=data,
         )
-        
+        print(response.json())
         if response.status_code == 200:
             result = response.json()
             logger.info(f"OCR API response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
@@ -122,109 +122,157 @@ def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[d
 
 def create_transaction_extraction_prompt(ocr_content):
     """Create a prompt for extracting transaction data from OCR content."""
-    return f"""Extract transaction data from this invoice and return as JSON:
+    return f"""You must return ONLY a valid JSON object. Do not include any code, explanations, or markdown.
+
+Extract data from this invoice and return ONLY this JSON format:
 
 {{
   "toLandlordDate": "YYYY-MM-DD or null",
   "toLandLordMode": "string or null", 
-  "toLandlordRentReceived": "float or null",
-  "toLandlordLessManagementFees": "float or null",
-  "toLandlordLessBuildingExpenditure": "float or null",
-  "toLandlordLessBuildingExpenditureActual": "float or null",
-  "toLandlordLessBuildingExpenditureDifference": "float or null",
-  "toLandlordNetPaid": "float or null",
-  "toLandlordLessVAT": "float or null",
+  "toLandlordRentReceived": "number or null",
+  "toLandlordLessManagementFees": "number or null",
+  "toLandlordLessBuildingExpenditure": "number or null",
+  "toLandlordLessBuildingExpenditureActual": "number or null",
+  "toLandlordLessBuildingExpenditureDifference": "number or null",
+  "toLandlordNetPaid": "number or null",
+  "toLandlordLessVAT": "number or null",
   "toLandlordChequeNo": "string or null",
   "toLandlordExpenditureDescription": "string or null",
   "toLandlordPaidBy": "string or null",
   "toLandlordDefaultExpenditure": "string or null",
-  "toLandlordNetReceived": "float or null"
+  "toLandlordNetReceived": "number or null"
 }}
 
-Invoice content:
-{ocr_content}
+Map fields: statement_date->toLandlordDate, total/amount->toLandlordRentReceived, tax->toLandlordLessVAT, bill_to_name->toLandlordPaidBy
 
-Return only the JSON object."""
+Invoice data: {ocr_content}
+
+Return ONLY the JSON object above, nothing else."""
 
 def extract_transaction_data(ocr_content):
-    """Extract transaction data using LLM."""
+    """Extract transaction data using Groq free API with multiple model fallback."""
     import time
-    time.sleep(1)  # Add 1 second delay to avoid rate limiting
-    
-    url = "https://apifreellm.com/api/chat"
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "cross-site"
-    }
-    
+    from llm_config import GROQ_TOKEN, RATE_LIMIT_DELAY, API_TIMEOUT, GROQ_MODELS
+
+    time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
+
     # Create the extraction prompt
     prompt = create_transaction_extraction_prompt(ocr_content)
-    
-    data = {
-        "message": prompt
+
+    # Groq API configuration
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_TOKEN}",
+        "Content-Type": "application/json"
     }
-    print("Prompt being sent to LLM API:", prompt[:100] + "..." if len(prompt) > 100 else prompt)
-    try:
-        # Set a shorter timeout to avoid the 2-minute limit
-        resp = requests.post(url, headers=headers, json=data, timeout=90)  # 90 seconds timeout
-        
-        if resp.status_code != 200:
-            if resp.status_code in [403, 500, 502, 503, 504]:
-                logger.warning(f"LLM API returned status {resp.status_code}, using fallback extraction")
-                return extract_basic_transaction_data(ocr_content)
-            else:
-                return {
-                    'success': False,
-                    'error': f'API returned status {resp.status_code}: {resp.text[:200]}...'
-                }
-        
-        js = resp.json()
-        
-        if js.get('status') == 'success':
-            response_text = js.get('response', '')
-            if not response_text.strip():
-                return {
-                    'success': False,
-                    'error': 'Empty response from LLM API',
-                    'raw_response': response_text
-                }
+    
+    # Try multiple models
+    for model in GROQ_MODELS:
+        try:
+            logger.info(f"Trying Groq API with model: {model}")
             
-            # Try to parse the JSON response
-            import json
-            try:
-                transaction_data = json.loads(response_text)
-                return {
-                    'success': True,
-                    'data': transaction_data,
-                    'raw_response': response_text
-                }
-            except json.JSONDecodeError as e:
-                logger.warning(f"LLM API returned invalid JSON, using fallback extraction. Error: {str(e)}")
-                logger.warning(f"Raw response: {response_text[:200]}...")
-                return extract_basic_transaction_data(ocr_content)
-        else:
-            logger.warning(f"LLM API returned error status: {js.get('status')}, using fallback extraction")
+            data = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 1000
+            }
+            
+            resp = requests.post(url, headers=headers, json=data, timeout=API_TIMEOUT)
+            
+            if resp.status_code == 200:
+                logger.info(f"Groq API responded successfully with {model}")
+                result = parse_groq_response(resp.json(), ocr_content)
+                if result.get('success') and not result.get('fallback'):
+                    return result
+                else:
+                    logger.warning(f"Model {model} returned fallback, trying next model")
+                    continue
+            else:
+                logger.warning(f"Model {model} returned status {resp.status_code}: {resp.text[:200]}")
+                continue
+                
+        except Exception as e:
+            logger.warning(f"Model {model} failed: {str(e)}, trying next model")
+            continue
+    
+    # If all models failed, use fallback
+    logger.warning("All Groq models failed, using fallback extraction")
+    return extract_basic_transaction_data(ocr_content)
+
+def parse_groq_response(response_data, ocr_content):
+    """Parse Groq API response and extract transaction data."""
+    import json
+    import re
+    
+    try:
+        # Extract text from Groq response
+        response_text = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        
+        if not response_text.strip():
+            logger.warning("Groq returned empty response, using fallback")
             return extract_basic_transaction_data(ocr_content)
-    except requests.exceptions.Timeout:
-        logger.warning("LLM API timed out, using fallback extraction")
-        return extract_basic_transaction_data(ocr_content)
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"LLM API request failed: {str(e)}, using fallback extraction")
-        return extract_basic_transaction_data(ocr_content)
+        
+        logger.info(f"Groq response preview: {response_text[:200]}...")
+        
+        # Try multiple JSON extraction patterns
+        json_patterns = [
+            r'\{[^{}]*"toLandlordDate"[^{}]*\}',  # Look for our specific fields
+            r'\{.*?"toLandlordDate".*?\}',  # More flexible pattern
+            r'```json\s*(\{.*?\})\s*```',  # JSON in code blocks
+            r'```\s*(\{.*?\})\s*```',  # Any code block with JSON
+            r'\{.*\}',  # Any JSON object
+        ]
+        
+        transaction_data = None
+        for pattern in json_patterns:
+            json_match = re.search(pattern, response_text, re.DOTALL)
+            if json_match:
+                json_text = json_match.group(0)
+                try:
+                    transaction_data = json.loads(json_text)
+                    logger.info(f"Successfully parsed JSON with pattern: {pattern}")
+                    break
+                except json.JSONDecodeError:
+                    continue
+        
+        if not transaction_data:
+            logger.warning("Could not extract valid JSON from Groq response, using fallback")
+            return extract_basic_transaction_data(ocr_content)
+        
+        # Validate the response format
+        required_fields = [
+            "toLandlordDate", "toLandLordMode", "toLandlordRentReceived",
+            "toLandlordLessManagementFees", "toLandlordLessBuildingExpenditure",
+            "toLandlordLessBuildingExpenditureActual", "toLandlordLessBuildingExpenditureDifference",
+            "toLandlordNetPaid", "toLandlordLessVAT", "toLandlordChequeNo",
+            "toLandlordExpenditureDescription", "toLandlordPaidBy",
+            "toLandlordDefaultExpenditure", "toLandlordNetReceived"
+        ]
+        
+        # Check if response has the correct field names
+        has_correct_fields = all(field in transaction_data for field in required_fields)
+        
+        if has_correct_fields:
+            logger.info("Groq API extracted data successfully")
+            return {
+                'success': True,
+                'data': transaction_data,
+                'raw_response': response_text,
+                'api_used': 'Groq'
+            }
+        else:
+            logger.warning(f"Groq returned wrong format. Fields found: {list(transaction_data.keys())}, using fallback")
+            return extract_basic_transaction_data(ocr_content)
+            
     except Exception as e:
-        logger.warning(f"Unexpected error in LLM API: {str(e)}, using fallback extraction")
+        logger.warning(f"Error parsing Groq response: {str(e)}, using fallback")
         return extract_basic_transaction_data(ocr_content)
 
 def extract_basic_transaction_data(ocr_content):
     """Fallback: Extract basic transaction data using simple pattern matching."""
     import re
+    import json
     from datetime import datetime
     
     result = {
@@ -247,7 +295,135 @@ def extract_basic_transaction_data(ocr_content):
     try:
         logger.info("Using fallback extraction method")
         
-        # Extract monetary amounts - improved pattern
+        # Try to parse as JSON first (if OCR returned structured data)
+        try:
+            if ocr_content.strip().startswith('{'):
+                data = json.loads(ocr_content)
+                
+                # Extract from structured JSON
+                # Try different date field names
+                date_fields = ['invoice_date', 'date', 'invoiceDate', 'Date', 'InvoiceDate', 'invoice_date', 'INVOICE_DATE', 'statement_date', 'StatementDate', 'STATEMENT_DATE']
+                for field in date_fields:
+                    if field in data:
+                        date_str = data[field]
+                        if '/' in date_str:
+                            parts = date_str.split('/')
+                            if len(parts) == 3:
+                                month, day, year = parts
+                                result["toLandlordDate"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                            else:
+                                result["toLandlordDate"] = date_str
+                        else:
+                            result["toLandlordDate"] = date_str
+                        break
+                
+                # Try different total field names
+                total_fields = ['total', 'amount', 'total_amount', 'grand_total', 'sum', 'Total', 'Amount', 'TOTAL', 'AMOUNT', 'TotalAmount', 'GrandTotal', 'Subtotal']
+                for field in total_fields:
+                    if field in data:
+                        result["toLandlordRentReceived"] = float(data[field])
+                        break
+                
+                # Set net received as the same as rent received
+                if result["toLandlordRentReceived"]:
+                    result["toLandlordNetReceived"] = result["toLandlordRentReceived"]
+                
+                # Try different tax field names
+                tax_fields = ['sales_tax', 'tax', 'vat', 'VAT', 'tax_amount']
+                for field in tax_fields:
+                    if field in data:
+                        result["toLandlordLessVAT"] = float(data[field])
+                        break
+                
+                # Try different name field names
+                name_fields = ['bill_to_name', 'customer_name', 'client_name', 'name', 'billToName', 'CustomerName', 'customerName', 'CUSTOMER_NAME']
+                for field in name_fields:
+                    if field in data:
+                        result["toLandlordPaidBy"] = data[field]
+                        break
+                
+                # Combine item descriptions - try different patterns
+                descriptions = []
+                
+                # Pattern 1: Item1Description, Item2Description, etc. (your format)
+                for i in range(1, 10):
+                    item_key = f'Item{i}Description'
+                    if item_key in data and data[item_key]:
+                        descriptions.append(data[item_key])
+                
+                # Pattern 2: item_1_description, item_2_description, etc.
+                if not descriptions:
+                    for i in range(1, 10):
+                        item_key = f'item_{i}_description'
+                        if item_key in data and data[item_key]:
+                            descriptions.append(data[item_key])
+                
+                # Pattern 3: description, description_1, description_2, etc.
+                if not descriptions:
+                    desc_fields = ['description', 'item_description', 'service_description']
+                    for field in desc_fields:
+                        if field in data and data[field]:
+                            descriptions.append(data[field])
+                    
+                    for i in range(1, 10):
+                        desc_key = f'description_{i}'
+                        if desc_key in data and data[desc_key]:
+                            descriptions.append(data[desc_key])
+                
+                if descriptions:
+                    result["toLandlordExpenditureDescription"] = "; ".join(descriptions)
+                
+                # Set payment mode based on terms
+                terms_fields = ['terms', 'payment_terms', 'PaymentTerms', 'PAYMENT_TERMS']
+                for field in terms_fields:
+                    if field in data:
+                        terms = data[field].lower()
+                        if 'net' in terms:
+                            result["toLandLordMode"] = "net payment"
+                        elif 'cash' in terms:
+                            result["toLandLordMode"] = "cash"
+                        elif 'cheque' in terms or 'check' in terms:
+                            result["toLandLordMode"] = "cheque"
+                        elif 'bank' in terms:
+                            result["toLandLordMode"] = "bank transfer"
+                        else:
+                            result["toLandLordMode"] = "unknown"
+                        break
+                
+                # If no terms found, set default
+                if not result["toLandLordMode"]:
+                    result["toLandLordMode"] = "unknown"
+                
+                # Extract vendor information for additional context
+                vendor_fields = ['vendor_name', 'VendorName', 'supplier_name', 'company_name']
+                for field in vendor_fields:
+                    if field in data and data[field]:
+                        # Add vendor info to description if not already present
+                        if not result["toLandlordExpenditureDescription"]:
+                            result["toLandlordExpenditureDescription"] = f"Vendor: {data[field]}"
+                        break
+                
+                # Try to extract invoice number as cheque number if available
+                invoice_fields = ['invoice_number', 'InvoiceNumber', 'invoice_no', 'InvoiceNo']
+                for field in invoice_fields:
+                    if field in data and data[field]:
+                        result["toLandlordChequeNo"] = str(data[field])
+                        break
+                
+                logger.info("Extracted data from structured JSON")
+                return {
+                    'success': True,
+                    'data': result,
+                    'raw_response': 'JSON extraction fallback used',
+                    'fallback': True
+                }
+        except json.JSONDecodeError:
+            pass  # Continue with regex extraction
+        
+        # Fallback to regex extraction for non-JSON content
+        logger.info("Using regex extraction for non-JSON content")
+        
+        # Extract monetary amounts
         money_patterns = [
             r'[£$€]\s*(\d+(?:\.\d{2})?)',  # £50.00
             r'(\d+(?:\.\d{2})?)\s*[£$€]',  # 50.00£
@@ -260,17 +436,15 @@ def extract_basic_transaction_data(ocr_content):
             amounts.extend(matches)
         
         if amounts:
-            # Convert to float and use the largest amount as rent received
             amounts_float = [float(amount) for amount in amounts]
             result["toLandlordRentReceived"] = max(amounts_float)
             logger.info(f"Extracted amounts: {amounts_float}, using {max(amounts_float)} as rent received")
         
-        # Extract dates - improved patterns
+        # Extract dates
         date_patterns = [
             r'Invoice\s+Date\s+(\d+)',  # Invoice Date 062
             r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})',  # DD/MM/YYYY or DD-MM-YYYY
             r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',  # YYYY/MM/DD or YYYY-MM-DD
-            r'Date[:\s]*(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})',  # Date: DD/MM/YYYY
         ]
         
         for pattern in date_patterns:
@@ -279,10 +453,8 @@ def extract_basic_transaction_data(ocr_content):
                 try:
                     if len(dates[0]) == 1:  # Invoice Date 062 format
                         day = dates[0]
-                        # Assume current year and month for day-only dates
                         current_date = datetime.now()
                         result["toLandlordDate"] = f"{current_date.year}-{current_date.month:02d}-{day.zfill(2)}"
-                        logger.info(f"Extracted date from day-only format: {result['toLandlordDate']}")
                         break
                     elif len(dates[0]) == 3:
                         if len(dates[0][2]) == 4:  # Full year
@@ -295,44 +467,25 @@ def extract_basic_transaction_data(ocr_content):
                             year = f"20{year}" if int(year) < 50 else f"19{year}"
                         
                         result["toLandlordDate"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                        logger.info(f"Extracted date: {result['toLandlordDate']}")
                         break
                 except Exception as e:
-                    logger.warning(f"Date extraction failed for pattern {pattern}: {e}")
+                    logger.warning(f"Date extraction failed: {e}")
                     continue
         
-        # Extract description from the content - improved
+        # Extract description
         lines = ocr_content.split('\n')
         description_keywords = ['descaling', 'heating', 'hot water', 'maintenance', 'repair', 'problem', 'working']
         
         for line in lines:
             line_lower = line.lower()
             if any(keyword in line_lower for keyword in description_keywords):
-                # Clean up the description
                 description = line.strip()
-                # Remove HTML tags if present
                 description = re.sub(r'<[^>]+>', ' ', description)
-                # Clean up extra spaces
                 description = re.sub(r'\s+', ' ', description).strip()
                 result["toLandlordExpenditureDescription"] = description
-                logger.info(f"Extracted description: {description}")
                 break
         
-        # Look for VAT information - improved
-        vat_patterns = [
-            r'VAT[:\s]*[£$€]?\s*(\d+(?:\.\d{2})?)',
-            r'(\d+(?:\.\d{2})?)\s*[£$€]?\s*VAT',
-            r'VAT\s+NET[:\s]*[£$€]?\s*(\d+(?:\.\d{2})?)',
-        ]
-        
-        for pattern in vat_patterns:
-            vat_match = re.search(pattern, ocr_content, re.IGNORECASE)
-            if vat_match:
-                result["toLandlordLessVAT"] = float(vat_match.group(1))
-                logger.info(f"Extracted VAT: {result['toLandlordLessVAT']}")
-                break
-        
-        # Set payment mode based on content
+        # Set payment mode
         if 'cheque' in ocr_content.lower():
             result["toLandLordMode"] = "cheque"
         elif 'bank' in ocr_content.lower():
@@ -342,7 +495,7 @@ def extract_basic_transaction_data(ocr_content):
         else:
             result["toLandLordMode"] = "unknown"
         
-        # Set net received as the same as rent received for now
+        # Set net received
         if result["toLandlordRentReceived"]:
             result["toLandlordNetReceived"] = result["toLandlordRentReceived"]
         
@@ -351,7 +504,7 @@ def extract_basic_transaction_data(ocr_content):
         return {
             'success': True,
             'data': result,
-            'raw_response': 'Basic extraction fallback used',
+            'raw_response': 'Regex extraction fallback used',
             'fallback': True
         }
         
