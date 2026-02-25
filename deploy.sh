@@ -2,7 +2,7 @@
 set -e  # Exit on any error
 
 echo "Navigating to project directory..."
-cd ./woodland/woodland_ocr || { echo "Directory not found!"; exit 1; }
+cd ./home/ubuntu/woodland_ocr || { echo "Directory not found!"; exit 1; }
 
 
 
