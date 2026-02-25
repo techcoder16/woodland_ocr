@@ -257,6 +257,11 @@ def extract_transaction_data(ocr_content):
     import time
     from llm_config import GROQ_TOKEN, RATE_LIMIT_DELAY, API_TIMEOUT, GROQ_MODELS
 
+    # Check if Groq API key is configured
+    if GROQ_TOKEN == "gsk_your_token_here" or not GROQ_TOKEN:
+        logger.warning("Groq API key not configured, using fallback extraction")
+        return extract_basic_transaction_data(ocr_content)
+
     time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
 
     # Create the extraction prompt
@@ -291,6 +296,9 @@ def extract_transaction_data(ocr_content):
                 else:
                     logger.warning(f"Model {model} returned fallback, trying next model")
                     continue
+            elif resp.status_code == 401:
+                logger.warning(f"Groq API key invalid (401), skipping Groq and using fallback")
+                break  # Don't try other models if API key is invalid
             else:
                 logger.warning(f"Model {model} returned status {resp.status_code}: {resp.text[:200]}")
                 continue
@@ -555,6 +563,10 @@ def extract_basic_transaction_data(ocr_content):
         
         # Fallback to regex extraction for non-JSON content
         logger.info("Using regex extraction for non-JSON content")
+        
+        # Ensure ocr_content is not None
+        if ocr_content is None:
+            ocr_content = ""
         
         # Extract monetary amounts
         money_patterns = [

@@ -7,6 +7,11 @@ load_dotenv(dotenv_path="/app/.env")
 # Groq API (Free tier: 14,400 requests per day)
 GROQ_TOKEN = os.getenv("GROQ_TOKEN") or "gsk_your_token_here"  # Replace with your actual Groq token
 
+# Check if API key is properly configured
+if GROQ_TOKEN == "gsk_your_token_here":
+    print("WARNING: Groq API key not configured. Set GROQ_TOKEN environment variable or update llm_config.py")
+    print("Get your free API key from: https://console.groq.com/keys")
+
 # Rate limiting (seconds between requests)
 RATE_LIMIT_DELAY = 1
 
