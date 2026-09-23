@@ -2,4 +2,5 @@
 .env
 .venv
 __pycache__/
-*.pyc11.png
+*.pyc
+11.png
