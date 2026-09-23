@@ -1,50 +1,43 @@
-# Groq Free API Setup Guide
+# Woodland OCR — OpenRouter Setup
 
-This system uses Groq's free API for fast and reliable transaction data extraction.
+Woodland OCR uses [OpenRouter](https://openrouter.ai) for both the document/adjustment
+extraction (`/extract-transaction`) and the chat/agent endpoints (`/agent/chat`,
+`/agent/chat/stream`) in `agent_brain.py`. One key, one provider.
 
 ## Setup (2 minutes)
 
-1. **Get Groq API Key**:
-   - Go to [Groq Console](https://console.groq.com/keys)
-   - Sign up for a free account (no credit card required)
-   - Create an API key
-
-2. **Update Configuration**:
-   - Open `llm_config.py`
-   - Replace `gsk_your_token_here` with your actual token:
-   ```python
-   GROQ_TOKEN = "gsk_your_actual_token_here"
+1. **Get an OpenRouter API key**: https://openrouter.ai/keys
+2. **Set it as an environment variable** (see `.env` at the repo root, loaded by
+   `start-dev.ps1`):
    ```
-
-3. **Restart Your App**:
+   OPENROUTER_API_KEY=sk-or-v1-your-actual-key
+   OPENROUTER_MODEL=openai/gpt-4o-mini
+   OPENROUTER_EXTRACT_MODELS=openai/gpt-4o-mini,anthropic/claude-3.5-haiku,meta-llama/llama-3.1-8b-instruct
+   ```
+3. **Restart the app** (or just start it via `start-dev.ps1`, which now launches this
+   service automatically):
    ```bash
-   python3 app.py
+   python app.py
    ```
-
-## Free Tier Limits
-
-- **14,400 requests per day** (plenty for most use cases)
-- **Fast responses** (usually under 1 second)
-- **No credit card required**
 
 ## How It Works
 
-1. **Groq API** - Tries to extract structured data using AI
-2. **Pattern Matching** - Falls back to regex extraction if Groq fails
-3. **Always works** - Guaranteed to return transaction data
+1. **OpenRouter** — tries each model in `OPENROUTER_EXTRACT_MODELS`, in order, to
+   extract structured transaction/adjustment data (contractual rent, management
+   fees, building expenditure, VAT, etc. — the same fields the Landlord Payment
+   adjustment breakdown uses).
+2. **Pattern matching fallback** — if no key is configured or every model fails,
+   falls back to regex extraction so the endpoint always returns something usable.
 
 ## Testing
 
-Test the setup:
 ```bash
-curl -X POST "http://localhost:5006/extract-transaction" \
-  -F "file=@your_invoice.png"
+curl -X POST "http://localhost:5006/extract-transaction" -F "file=@your_invoice.png"
 ```
 
 ## Troubleshooting
 
-- **"Invalid API key"**: Check your token in `llm_config.py`
-- **"Rate limit exceeded"**: Wait a few minutes (14,400 requests/day is generous)
-- **Still getting fallback**: Check logs to see what's happening
-
-The system will always work - if Groq fails, it uses pattern matching as backup!
+- **"Invalid API key"**: check `OPENROUTER_API_KEY` in your `.env`.
+- **Still getting fallback**: check the app logs — a listed model may be
+  unavailable on your OpenRouter plan; trim `OPENROUTER_EXTRACT_MODELS` to
+  models you have access to.

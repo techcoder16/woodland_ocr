@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import requests
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pdf2image import convert_from_bytes
 from PIL import Image
 import io
@@ -15,6 +15,7 @@ import logging
 from config import config
 
 from pydantic import BaseModel
+from agent_brain import agent
 # from database import Base
 
 # from models import ProcessedDocument, APIUsage
@@ -25,6 +26,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 # from pydantic_model import ProcessResponse
 app = FastAPI(title="Document Processing API", version="1.0.0")
+
+class AgentRequest(BaseModel):
+    question: str
+    context: Optional[Dict[str, Any]] = None
+    model: Optional[str] = None
+
+class AgentSummaryRequest(BaseModel):
+    ocr_result: Dict[str, Any]
 # Base.metadata.create_all(bind=engine)
 
 # def get_db():
@@ -252,14 +261,160 @@ Invoice data: {ocr_content}
 
 Return ONLY the JSON object above, nothing else."""
 
-def extract_transaction_data(ocr_content):
-    """Extract transaction data using Groq free API with multiple model fallback."""
-    import time
-    from llm_config import GROQ_TOKEN, RATE_LIMIT_DELAY, API_TIMEOUT, GROQ_MODELS
+def create_certificate_dates_extraction_prompt(ocr_content):
+    """Create a prompt for extracting issue/expiry dates and a document type
+    from a compliance certificate (gas safety, EICR, EPC, property license,
+    fire risk assessment, insurance)."""
+    return f"""You must return ONLY a valid JSON object. Do not include any code, explanations, or markdown.
 
-    # Check if Groq API key is configured
-    if GROQ_TOKEN == "gsk_your_token_here" or not GROQ_TOKEN:
-        logger.warning("Groq API key not configured, using fallback extraction")
+Extract data from this certificate/license document and return ONLY this JSON format:
+
+{{
+  "docType": "one of GAS_SAFETY, ELECTRICAL_SAFETY, EPC, PROPERTY_LICENSE, FIRE_RISK_ASSESSMENT, INSURANCE, OTHER, or null if unclear",
+  "issueDate": "YYYY-MM-DD or null",
+  "expiryDate": "YYYY-MM-DD or null",
+  "certificateNumber": "string or null",
+  "issuedBy": "string or null"
+}}
+
+Look for terms like: "issue date", "inspection date", "date of inspection", "valid from" for issueDate.
+Look for terms like: "expiry date", "valid until", "next inspection due", "renewal date" for expiryDate.
+
+Certificate data: {ocr_content}
+
+Return ONLY the JSON object above, nothing else."""
+
+def extract_certificate_dates(ocr_content):
+    """Extract issue/expiry dates from a compliance certificate using
+    OpenRouter, with multiple model fallback and a regex-based fallback
+    if every model fails."""
+    import time
+    from llm_config import OPENROUTER_API_KEY, RATE_LIMIT_DELAY, API_TIMEOUT, OPENROUTER_MODELS
+
+    if not OPENROUTER_API_KEY:
+        logger.warning("OpenRouter API key not configured, using fallback date extraction")
+        return extract_basic_certificate_dates(ocr_content)
+
+    time.sleep(RATE_LIMIT_DELAY)
+    prompt = create_certificate_dates_extraction_prompt(ocr_content)
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://woodlandltd.com"),
+        "X-Title": "Woodland OCR",
+    }
+
+    for model in OPENROUTER_MODELS:
+        try:
+            logger.info(f"Trying OpenRouter with model: {model} for certificate dates")
+            data = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 500
+            }
+            resp = requests.post(url, headers=headers, json=data, timeout=API_TIMEOUT)
+            if resp.status_code == 200:
+                result = parse_certificate_dates_response(resp.json(), ocr_content, model)
+                if result.get('success') and not result.get('fallback'):
+                    return result
+                continue
+            elif resp.status_code == 401:
+                logger.warning("OpenRouter API key invalid (401), skipping OpenRouter and using fallback")
+                break
+        except Exception as e:
+            logger.warning(f"Model {model} failed: {str(e)}, trying next model")
+            continue
+
+    logger.warning("All OpenRouter models failed, using fallback date extraction")
+    return extract_basic_certificate_dates(ocr_content)
+
+def parse_certificate_dates_response(response_data, ocr_content, model_used=None):
+    """Parse an OpenRouter chat-completion response for certificate dates."""
+    import json
+    import re
+
+    try:
+        response_text = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if not response_text.strip():
+            return extract_basic_certificate_dates(ocr_content)
+
+        json_patterns = [
+            r'\{[^{}]*"expiryDate"[^{}]*\}',
+            r'\{.*?"expiryDate".*?\}',
+            r'```json\s*(\{.*?\})\s*```',
+            r'```\s*(\{.*?\})\s*```',
+            r'\{.*\}',
+        ]
+        data = None
+        for pattern in json_patterns:
+            match = re.search(pattern, response_text, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                    break
+                except json.JSONDecodeError:
+                    continue
+
+        if not data:
+            return extract_basic_certificate_dates(ocr_content)
+
+        return {
+            'success': True,
+            'data': {
+                'docType': data.get('docType'),
+                'issueDate': data.get('issueDate'),
+                'expiryDate': data.get('expiryDate'),
+                'certificateNumber': data.get('certificateNumber'),
+                'issuedBy': data.get('issuedBy'),
+            },
+            'raw_response': response_text,
+            'api_used': f'OpenRouter:{model_used}' if model_used else 'OpenRouter',
+        }
+    except Exception as e:
+        logger.warning(f"Error parsing certificate dates response: {str(e)}, using fallback")
+        return extract_basic_certificate_dates(ocr_content)
+
+def extract_basic_certificate_dates(ocr_content):
+    """Fallback: pattern-match common date formats near issue/expiry
+    keywords when no LLM extraction is available."""
+    import re
+    text = str(ocr_content)
+
+    date_pattern = r'(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4}-\d{2}-\d{2})'
+
+    def find_near(keywords):
+        for kw in keywords:
+            match = re.search(kw + r'[:\s]*' + date_pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+
+    issue_date = find_near([r'issue\s*date', r'inspection\s*date', r'date\s*of\s*inspection', r'valid\s*from'])
+    expiry_date = find_near([r'expiry\s*date', r'valid\s*until', r'next\s*inspection\s*due', r'renewal\s*date'])
+
+    return {
+        'success': True,
+        'fallback': True,
+        'data': {
+            'docType': None,
+            'issueDate': issue_date,
+            'expiryDate': expiry_date,
+            'certificateNumber': None,
+            'issuedBy': None,
+        },
+        'api_used': 'pattern-matching',
+    }
+
+def extract_transaction_data(ocr_content):
+    """Extract transaction data (incl. adjustment breakdown) using OpenRouter, with multiple model fallback."""
+    import time
+    from llm_config import OPENROUTER_API_KEY, RATE_LIMIT_DELAY, API_TIMEOUT, OPENROUTER_MODELS
+
+    if not OPENROUTER_API_KEY:
+        logger.warning("OpenRouter API key not configured, using fallback extraction")
         return extract_basic_transaction_data(ocr_content)
 
     time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
@@ -267,65 +422,65 @@ def extract_transaction_data(ocr_content):
     # Create the extraction prompt
     prompt = create_transaction_extraction_prompt(ocr_content)
 
-    # Groq API configuration
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {GROQ_TOKEN}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://woodlandltd.com"),
+        "X-Title": "Woodland OCR",
     }
-    
-    # Try multiple models
-    for model in GROQ_MODELS:
+
+    # Try multiple models in order until one returns a valid extraction
+    for model in OPENROUTER_MODELS:
         try:
-            logger.info(f"Trying Groq API with model: {model}")
-            
+            logger.info(f"Trying OpenRouter with model: {model}")
+
             data = {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.1,
                 "max_tokens": 1000
             }
-            
+
             resp = requests.post(url, headers=headers, json=data, timeout=API_TIMEOUT)
-            
+
             if resp.status_code == 200:
-                logger.info(f"Groq API responded successfully with {model}")
-                result = parse_groq_response(resp.json(), ocr_content)
+                logger.info(f"OpenRouter responded successfully with {model}")
+                result = parse_llm_response(resp.json(), ocr_content, model)
                 if result.get('success') and not result.get('fallback'):
                     return result
                 else:
                     logger.warning(f"Model {model} returned fallback, trying next model")
                     continue
             elif resp.status_code == 401:
-                logger.warning(f"Groq API key invalid (401), skipping Groq and using fallback")
+                logger.warning("OpenRouter API key invalid (401), skipping OpenRouter and using fallback")
                 break  # Don't try other models if API key is invalid
             else:
                 logger.warning(f"Model {model} returned status {resp.status_code}: {resp.text[:200]}")
                 continue
-                
+
         except Exception as e:
             logger.warning(f"Model {model} failed: {str(e)}, trying next model")
             continue
-    
+
     # If all models failed, use fallback
-    logger.warning("All Groq models failed, using fallback extraction")
+    logger.warning("All OpenRouter models failed, using fallback extraction")
     return extract_basic_transaction_data(ocr_content)
 
-def parse_groq_response(response_data, ocr_content):
-    """Parse Groq API response and extract transaction data."""
+def parse_llm_response(response_data, ocr_content, model_used=None):
+    """Parse an OpenRouter chat-completion response and extract transaction data."""
     import json
     import re
-    
+
     try:
-        # Extract text from Groq response
         response_text = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        
+
         if not response_text.strip():
-            logger.warning("Groq returned empty response, using fallback")
+            logger.warning("OpenRouter returned empty response, using fallback")
             return extract_basic_transaction_data(ocr_content)
-        
-        logger.info(f"Groq response preview: {response_text[:200]}...")
-        
+
+        logger.info(f"OpenRouter response preview: {response_text[:200]}...")
+
         # Try multiple JSON extraction patterns
         json_patterns = [
             r'\{[^{}]*"toLandlordDate"[^{}]*\}',  # Look for our specific fields
@@ -334,7 +489,7 @@ def parse_groq_response(response_data, ocr_content):
             r'```\s*(\{.*?\})\s*```',  # Any code block with JSON
             r'\{.*\}',  # Any JSON object
         ]
-        
+
         transaction_data = None
         for pattern in json_patterns:
             json_match = re.search(pattern, response_text, re.DOTALL)
@@ -346,11 +501,11 @@ def parse_groq_response(response_data, ocr_content):
                     break
                 except json.JSONDecodeError:
                     continue
-        
+
         if not transaction_data:
-            logger.warning("Could not extract valid JSON from Groq response, using fallback")
+            logger.warning("Could not extract valid JSON from OpenRouter response, using fallback")
             return extract_basic_transaction_data(ocr_content)
-        
+
         # Validate the response format
         required_fields = [
             "toLandlordDate", "toLandLordMode", "toLandlordRentReceived",
@@ -360,24 +515,23 @@ def parse_groq_response(response_data, ocr_content):
             "toLandlordExpenditureDescription", "toLandlordPaidBy",
             "toLandlordDefaultExpenditure", "toLandlordNetReceived"
         ]
-        
-        # Check if response has the correct field names
+
         has_correct_fields = all(field in transaction_data for field in required_fields)
-        
+
         if has_correct_fields:
-            logger.info("Groq API extracted data successfully")
+            logger.info("OpenRouter extracted data successfully")
             return {
                 'success': True,
                 'data': transaction_data,
                 'raw_response': response_text,
-                'api_used': 'Groq'
+                'api_used': f'OpenRouter:{model_used}' if model_used else 'OpenRouter'
             }
         else:
-            logger.warning(f"Groq returned wrong format. Fields found: {list(transaction_data.keys())}, using fallback")
+            logger.warning(f"OpenRouter returned wrong format. Fields found: {list(transaction_data.keys())}, using fallback")
             return extract_basic_transaction_data(ocr_content)
-            
+
     except Exception as e:
-        logger.warning(f"Error parsing Groq response: {str(e)}, using fallback")
+        logger.warning(f"Error parsing OpenRouter response: {str(e)}, using fallback")
         return extract_basic_transaction_data(ocr_content)
 
 def extract_basic_transaction_data(ocr_content):
@@ -681,7 +835,51 @@ PROMPTS = {
 # -----------------------------
 @app.get("/")
 async def root():
-    return {"message": "Document Processing API is running"}
+    return {"message": "Woodland OCR agent brain is running", "capabilities": ["ocr", "rag", "discovery", "mcp-tools", "openrouter"]}
+
+@app.get("/agent/tools")
+async def agent_tools():
+    return {"tools": agent._tools()}
+
+@app.post("/agent/chat")
+async def agent_chat(request: AgentRequest):
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="question is required")
+    try:
+        return {"answer": agent.complete(request.question, request.context, request.model)}
+    except requests.RequestException as error:
+        logger.exception("Woodland agent provider failed")
+        raise HTTPException(status_code=502, detail="AI provider request failed") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+@app.post("/agent/chat/stream")
+async def agent_chat_stream(request: AgentRequest):
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="question is required")
+    try:
+        return StreamingResponse(
+            (f"data: {json.dumps({'token': token})}\n\n" for token in agent.stream(request.question, request.context, request.model)),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+    except requests.RequestException as error:
+        raise HTTPException(status_code=502, detail="AI provider request failed") from error
+
+@app.post("/agent/summarize")
+async def agent_summarize(request: AgentSummaryRequest):
+    try:
+        summary = agent.complete(
+            "Summarize this transaction document with sections Transaction, Amounts, Confidence/Warnings, and Review actions. "
+            "Do not create or approve a payment.\n\n" + json.dumps(request.ocr_result, default=str),
+            request.ocr_result,
+        )
+        return {"summary": summary}
+    except requests.RequestException as error:
+        logger.exception("Woodland agent provider failed")
+        raise HTTPException(status_code=502, detail="AI provider request failed") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 @app.get("/prompts")
 async def get_available_prompts():
@@ -883,6 +1081,50 @@ async def extract_transaction_from_ocr(
         "used_key": used_key_name,
         "cached": False,
         "message": "Transaction data extracted successfully"
+    }
+
+@app.post("/extract-certificate-dates")
+async def extract_certificate_dates_from_ocr(
+    file: UploadFile
+):
+    """
+    Extract issue/expiry dates and document type from a compliance
+    certificate (gas safety, EICR, EPC, property license, fire risk
+    assessment, insurance). Runs OCR on the file first, then asks the LLM
+    for the dates.
+    """
+    if not config.API_KEYS:
+        raise HTTPException(status_code=500, detail="No API keys configured")
+
+    try:
+        file_bytes = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
+
+    result = None
+    used_key_name = None
+    for i, api_key in enumerate(config.API_KEYS, 1):
+        key_name = f"api_key_{i}"
+        logger.info(f"Trying {key_name} for OCR")
+        result = process_file_with_images(file_bytes, file.filename, api_key)
+        if result:
+            used_key_name = key_name
+            break
+        logger.warning(f"{key_name} failed OCR processing")
+
+    if not result or 'content' not in result:
+        raise HTTPException(status_code=503, detail="OCR processing failed with all API keys")
+
+    dates_result = extract_certificate_dates(result['content'])
+    if not dates_result['success']:
+        raise HTTPException(status_code=500, detail="Certificate date extraction failed")
+
+    return {
+        "success": True,
+        "certificate_data": dates_result['data'],
+        "ocr_content": result['content'],
+        "used_key": used_key_name,
+        "message": "Certificate dates extracted successfully"
     }
 
 if __name__ == "__main__":

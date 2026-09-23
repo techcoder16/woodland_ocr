@@ -1,16 +1,16 @@
-# Groq Free API Configuration
-# Get your free API key from: https://console.groq.com/keys
+# Woodland OCR LLM configuration — OpenRouter (single provider for both
+# document extraction and the chat/agent side, matching agent_brain.py).
+# Get an API key from: https://openrouter.ai/keys
 import os
 from dotenv import load_dotenv  # <-- make sure python-dotenv is installed
 load_dotenv(dotenv_path="/app/.env")
+load_dotenv()  # also load a local .env when not running in the /app container
 
-# Groq API (Free tier: 14,400 requests per day)
-GROQ_TOKEN = os.getenv("GROQ_TOKEN") or "gsk_your_token_here"  # Replace with your actual Groq token
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or ""
 
-# Check if API key is properly configured
-if GROQ_TOKEN == "gsk_your_token_here":
-    print("WARNING: Groq API key not configured. Set GROQ_TOKEN environment variable or update llm_config.py")
-    print("Get your free API key from: https://console.groq.com/keys")
+if not OPENROUTER_API_KEY:
+    print("WARNING: OPENROUTER_API_KEY not configured. Set it in the environment or a .env file.")
+    print("Get a key from: https://openrouter.ai/keys")
 
 # Rate limiting (seconds between requests)
 RATE_LIMIT_DELAY = 1
@@ -18,10 +18,13 @@ RATE_LIMIT_DELAY = 1
 # Timeout for API requests (seconds)
 API_TIMEOUT = 30
 
-# Groq models to try (free models available)
-GROQ_MODELS = [
-    "llama-3.1-8b-instant",  # Fast and reliable
-    "llama-3.1-70b-versatile",  # More capable but slower
-    "mixtral-8x7b-32768"  # Alternative model
+# Models to try, in order, for structured transaction extraction. Override
+# with OPENROUTER_EXTRACT_MODELS as a comma-separated list.
+OPENROUTER_MODELS = [
+    m.strip()
+    for m in os.getenv(
+        "OPENROUTER_EXTRACT_MODELS",
+        "openai/gpt-4o-mini,anthropic/claude-3.5-haiku,meta-llama/llama-3.1-8b-instruct",
+    ).split(",")
+    if m.strip()
 ]
-GROQ_MODEL = GROQ_MODELS[0]  # Default to first model
