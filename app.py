@@ -34,6 +34,12 @@ class AgentRequest(BaseModel):
 
 class AgentSummaryRequest(BaseModel):
     ocr_result: Dict[str, Any]
+
+class DataAuditRequest(BaseModel):
+    question: str
+    summary: Dict[str, Any]
+    records: List[Dict[str, Any]] = []
+    model: Optional[str] = None
 # Base.metadata.create_all(bind=engine)
 
 # def get_db():
@@ -877,6 +883,20 @@ async def agent_summarize(request: AgentSummaryRequest):
         return {"summary": summary}
     except requests.RequestException as error:
         logger.exception("Woodland agent provider failed")
+        raise HTTPException(status_code=502, detail="AI provider request failed") from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+@app.post("/agent/data-audit")
+async def agent_data_audit(request: DataAuditRequest):
+    """Answer a question about which Woodland data is present and which is missing."""
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="question is required")
+    try:
+        answer = agent.audit_data(request.question, request.summary, request.records, request.model)
+        return {"answer": answer}
+    except requests.RequestException as error:
+        logger.exception("Woodland data audit provider failed")
         raise HTTPException(status_code=502, detail="AI provider request failed") from error
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error

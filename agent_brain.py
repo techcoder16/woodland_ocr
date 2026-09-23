@@ -64,6 +64,65 @@ class WoodlandAgent:
             raise RuntimeError("OpenRouter returned an empty response")
         return content.strip()
 
+    def audit_data(self, question: str, summary: Dict[str, Any], records: list, model: Optional[str] = None) -> str:
+        """Answer a data-completeness question from a Woodland audit scan.
+
+        `records` carries field names and presence only — never stored values — so
+        the model can report what is missing without ever seeing personal data.
+        """
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+
+        # Rank the gap records against the question so the most relevant ones
+        # survive the slice when the corpus is larger than the context budget.
+        terms = {term for term in question.lower().split() if len(term) > 2}
+        ranked = sorted(
+            records,
+            key=lambda record: sum(term in str(record).lower() for term in terms),
+            reverse=True,
+        )[:60]
+
+        system = (
+            "You are the Woodland data-completeness auditor. You are given a summary of a "
+            "database scan and a list of records with missing fields. Report only what the "
+            "data shows: which records are missing which fields, and which gaps are most "
+            "common. Never invent records, field names or counts. When asked what data is "
+            "present, infer it from completeness percentages and the absence of a field from "
+            "the missing list. You see field names only, never stored values, so never claim "
+            "to know what a field contains. Be concise and lead with the biggest gaps."
+        )
+        response = requests.post(
+            self.endpoint,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://woodlandltd.com"),
+                "X-Title": "Woodland Data Audit",
+            },
+            json={
+                "model": model or self.model,
+                "temperature": 0.1,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Scan summary:\n{json.dumps(summary, default=str)}\n\n"
+                            f"Records with missing fields:\n{json.dumps(ranked, default=str)}\n\n"
+                            f"Question: {question}"
+                        ),
+                    },
+                ],
+            },
+            timeout=90,
+        )
+        response.raise_for_status()
+        content = response.json().get("choices", [{}])[0].get("message", {}).get("content")
+        if not content:
+            raise RuntimeError("OpenRouter returned an empty response")
+        return content.strip()
+
     def stream(self, prompt: str, context: Optional[Dict[str, Any]] = None, model: Optional[str] = None):
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
