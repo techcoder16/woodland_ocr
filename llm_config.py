@@ -3,8 +3,13 @@
 # Get an API key from: https://openrouter.ai/keys
 import os
 from dotenv import load_dotenv  # <-- make sure python-dotenv is installed
-load_dotenv(dotenv_path="/app/.env")
-load_dotenv()  # also load a local .env when not running in the /app container
+
+# Resolve .env next to this file. A bare load_dotenv() searches upward from the
+# calling script's directory, which finds nothing when the app is launched as
+# `python app.py` — find_dotenv() returns '' and every key silently goes unset.
+_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(dotenv_path="/app/.env")  # container path, when running in Docker
+load_dotenv(dotenv_path=_ENV_PATH)    # local checkout
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or ""
 
