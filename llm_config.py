@@ -24,7 +24,9 @@ OPENROUTER_MODELS = [
     m.strip()
     for m in os.getenv(
         "OPENROUTER_EXTRACT_MODELS",
-        "openai/gpt-4o-mini,anthropic/claude-3.5-haiku,meta-llama/llama-3.1-8b-instruct",
+        # claude-3.5-haiku (undated) 404s on OpenRouter — the dated id is the
+        # routable one, and an unreachable model wastes a request per call.
+        "openai/gpt-4o-mini,anthropic/claude-3.5-haiku-20241022,meta-llama/llama-3.1-8b-instruct",
     ).split(",")
     if m.strip()
 ]

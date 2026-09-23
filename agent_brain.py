@@ -5,11 +5,22 @@ from typing import Any, Dict, Optional
 
 import requests
 
+# The key lives in .env, not the process environment, so load it the same way
+# llm_config does — without this every call here raised "not configured".
+from llm_config import OPENROUTER_API_KEY, OPENROUTER_MODELS
+
 
 class WoodlandAgent:
     def __init__(self) -> None:
         self.endpoint = "https://openrouter.ai/api/v1/chat/completions"
         self.model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+
+    def _api_key(self) -> str:
+        """Prefer a live process env var, else the .env value loaded at import."""
+        key = os.getenv("OPENROUTER_API_KEY") or OPENROUTER_API_KEY
+        if not key:
+            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+        return key
 
     def _retrieve(self, query: str, context: Optional[Dict[str, Any]]) -> str:
         """Small deterministic RAG layer; replace with vector retrieval as the corpus grows."""
@@ -30,9 +41,7 @@ class WoodlandAgent:
         ]
 
     def complete(self, prompt: str, context: Optional[Dict[str, Any]] = None, model: Optional[str] = None) -> str:
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+        api_key = self._api_key()
         rag_context = self._retrieve(prompt, context)
         system = (
             "You are Woodland OCR, the property-management AI brain. "
@@ -70,9 +79,7 @@ class WoodlandAgent:
         `records` carries field names and presence only — never stored values — so
         the model can report what is missing without ever seeing personal data.
         """
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+        api_key = self._api_key()
 
         # Rank the gap records against the question so the most relevant ones
         # survive the slice when the corpus is larger than the context budget.
@@ -124,33 +131,72 @@ class WoodlandAgent:
         return content.strip()
 
     def stream(self, prompt: str, context: Optional[Dict[str, Any]] = None, model: Optional[str] = None):
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY is not configured")
-        response = requests.post(
-            self.endpoint,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model or self.model,
-                "stream": True,
-                "temperature": 0.1,
-                "messages": [
-                    {"role": "system", "content": "You are Woodland OCR, a precise property-management assistant. Use only supplied context and never invent financial values."},
-                    {"role": "user", "content": f"Retrieved context:\n{self._retrieve(prompt, context)}\n\n{prompt}"},
-                ],
-            },
-            timeout=90,
-            stream=True,
-        )
-        response.raise_for_status()
-        for line in response.iter_lines(decode_unicode=True):
-            if line and line.startswith("data: ") and line[6:] != "[DONE]":
+        api_key = self._api_key()
+        messages = [
+            {"role": "system", "content": "You are Woodland OCR, a precise property-management assistant. Use only supplied context and never invent financial values."},
+            {"role": "user", "content": f"Retrieved context:\n{self._retrieve(prompt, context)}\n\n{prompt}"},
+        ]
+
+        # Try the requested model first, then fall back — a model the account
+        # cannot reach 404s, which previously surfaced as a silent empty stream.
+        candidates = [model] if model else []
+        candidates += [m for m in ([self.model] + OPENROUTER_MODELS) if m not in candidates]
+
+        last_error = None
+        for candidate in candidates:
+            try:
+                response = requests.post(
+                    self.endpoint,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://woodlandltd.com"),
+                        "X-Title": "Woodland OCR",
+                    },
+                    json={
+                        "model": candidate,
+                        "stream": True,
+                        "temperature": 0.1,
+                        "messages": messages,
+                    },
+                    timeout=90,
+                    stream=True,
+                )
+            except requests.RequestException as error:
+                last_error = f"{candidate}: {error}"
+                continue
+
+            if response.status_code != 200:
+                # Read the body so the real reason reaches the logs instead of
+                # being discarded as an empty stream.
+                last_error = f"{candidate}: HTTP {response.status_code} {response.text[:200]}"
+                response.close()
+                continue
+
+            yielded = False
+            for line in response.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data: "):
+                    continue
+                payload = line[6:].strip()
+                if payload == "[DONE]":
+                    break
                 try:
-                    delta = json.loads(line[6:]).get("choices", [{}])[0].get("delta", {}).get("content")
-                    if delta:
-                        yield delta
+                    choice = json.loads(payload).get("choices", [{}])[0]
                 except json.JSONDecodeError:
                     continue
+                delta = choice.get("delta", {}).get("content")
+                if delta:
+                    yielded = True
+                    yield delta
+                # A truncated answer is worth surfacing rather than ending quietly.
+                if choice.get("finish_reason") == "length":
+                    yield "\n\n[truncated: response hit the token limit]"
+
+            if yielded:
+                return
+            last_error = f"{candidate}: stream produced no content"
+
+        raise RuntimeError(f"OpenRouter streaming failed. Last error — {last_error}")
 
 
 agent = WoodlandAgent()
