@@ -4,3 +4,6 @@
 __pycache__/
 *.pyc
 11.png
+
+# Local run logs
+*.log

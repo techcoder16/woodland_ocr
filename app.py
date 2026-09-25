@@ -113,7 +113,7 @@ def process_file_with_images(file_bytes: bytes, filename: str, api_key: str) -> 
             all_results = []
             for i, image_bytes in enumerate(images):
                 logger.info(f"Processing image {i+1}/{len(images)}...")
-                result = call_docstrange(api_key, image_bytes, "Extract all text and data from this document")
+                result = call_docstrange(api_key, image_bytes, "Extract all text and data from this document", f"page-{i + 1}.png")
                 if result:
                     result['page_number'] = i + 1
                     all_results.append(result)
@@ -147,7 +147,7 @@ def process_file_with_images(file_bytes: bytes, filename: str, api_key: str) -> 
             if "poppler" in str(e.detail).lower():
                 logger.warning("PDF to image conversion failed (poppler not available), trying direct PDF processing...")
                 # Fallback: try to process PDF directly
-                result = call_docstrange(api_key, file_bytes, "Extract all text and data from this PDF document")
+                result = call_docstrange(api_key, file_bytes, "Extract all text and data from this PDF document", filename)
                 if result:
                     result['file_type'] = 'pdf'
                     result['pages_processed'] = 1
@@ -159,7 +159,7 @@ def process_file_with_images(file_bytes: bytes, filename: str, api_key: str) -> 
     else:
         # For non-PDF files, process directly
         logger.info(f"Processing {file_extension} file directly...")
-        return call_docstrange(api_key, file_bytes, "Extract all text and data from this document")
+        return call_docstrange(api_key, file_bytes, "Extract all text and data from this document", filename)
 
 # def get_or_create_usage_record(db: Session, key_name: str, month: str) -> APIUsage:
 #     """Get or create usage record for API key and month."""
@@ -213,31 +213,135 @@ def process_file_with_images(file_bytes: bytes, filename: str, api_key: str) -> 
     
 #     return summary
 
-def call_docstrange(api_key: str, image_bytes: bytes, prompt: str) -> Optional[dict]:
-    """Make a request to Docstrange API with a prompt."""
-    files = {"file": ("upload.png", image_bytes, "*")}
+def call_docstrange(api_key: str, image_bytes: bytes, prompt: str, filename: str = "upload.png") -> Optional[dict]:
+    """Run one file through the Nanonets extraction API and return a flat
+    {'success', 'content', ...} dict.
 
-    data = {"output_type": "flat-json"}
-    print("API key being used:", api_key[:10] + "...")  # Debugging line
+    The v1 API nests its payload under result.<format>.content and names the
+    format field `output_format` — the old `/extract` + `output_type` pair now
+    answers 429 "deprecated", which used to surface here as "all API keys
+    failed" and hid the real cause.
+    """
+    files = {"file": (filename or "upload.png", image_bytes, guess_content_type(filename))}
+    data = {"output_format": config.DOCSTRANGE_OUTPUT_FORMAT}
+
     try:
         response = requests.post(
             url=config.DOCSTRANGE_API_URL,
             headers={"Authorization": f"Bearer {api_key}"},
             files=files,
             data=data,
+            timeout=config.REQUEST_TIMEOUT,
         )
-        print(response.json())
-        if response.status_code == 200:
-            result = response.json()
-            logger.info(f"OCR API response keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
-            return result
-        else:
-            logger.error(f"API request failed with status {response.status_code}: {response.text}")
-            return None
-            
     except requests.exceptions.RequestException as e:
         logger.error(f"API request exception: {str(e)}")
         return None
+
+    if response.status_code != 200:
+        # The body carries the actionable reason (deprecated path, bad format,
+        # quota), so log it rather than just the status.
+        logger.error(f"OCR API failed with status {response.status_code}: {response.text[:400]}")
+        return None
+
+    try:
+        payload = response.json()
+    except ValueError:
+        logger.error("OCR API returned a non-JSON body")
+        return None
+
+    content = extract_docstrange_content(payload)
+    if content is None:
+        logger.error(f"OCR API response had no usable content. Keys: {list(payload.keys())}")
+        return None
+
+    return {
+        "success": True,
+        "content": content,
+        "format": payload.get("output_format", config.DOCSTRANGE_OUTPUT_FORMAT),
+        "record_id": payload.get("record_id"),
+        "processing_time": payload.get("processing_time", 0),
+        "processing_status": payload.get("status", "completed"),
+    }
+
+
+def guess_content_type(filename: Optional[str]) -> str:
+    """Map a filename to a MIME type. Sending '*' made the API reject some
+    uploads outright, so send the real type and default to PNG."""
+    import mimetypes
+
+    guessed = mimetypes.guess_type(filename or "")[0]
+    return guessed or "image/png"
+
+
+def extract_docstrange_content(payload: Dict[str, Any]) -> Optional[str]:
+    """Pull the text out of a v1 extraction response.
+
+    Shape: {"result": {"markdown": {"content": ...}, "json": {...}, ...}} where
+    every format but the requested one is null. Falls back to the older flat
+    shapes so a rollback on the provider side keeps working.
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for key in ("markdown", "json", "html", "csv"):
+            block = result.get(key)
+            if not block:
+                continue
+            content = block.get("content") if isinstance(block, dict) else block
+            if content in (None, ""):
+                continue
+            return content if isinstance(content, str) else json.dumps(content, default=str)
+
+    # Legacy/flat shapes.
+    for key in ("content", "extracted_text", "text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+
+    return None
+
+def run_ocr_with_key_rotation(file_bytes: bytes, filename: str) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    """Try each configured key in turn. Returns (result, key_name, last_error).
+
+    A key that raises (bad PDF, provider 5xx) must not abort the rotation, and
+    the reason the last key failed is carried back so the endpoint can report
+    something better than "all API keys failed".
+    """
+    import time
+
+    last_error = None
+    # Two passes: the provider occasionally answers 200 with an empty result,
+    # and retrying the same key a moment later succeeds. Without this a
+    # transient blip fails the user's upload outright.
+    attempts = [(i, key, 1) for i, key in enumerate(config.API_KEYS, 1)]
+    attempts += [(i, key, 2) for i, key in enumerate(config.API_KEYS, 1)]
+
+    for i, api_key, attempt in attempts:
+        key_name = f"api_key_{i}" + (f" (retry {attempt})" if attempt > 1 else "")
+        if attempt > 1:
+            time.sleep(2)
+        logger.info(f"Trying {key_name} for OCR")
+        try:
+            result = process_file_with_images(file_bytes, filename, api_key)
+        except HTTPException as error:
+            last_error = str(error.detail)
+            logger.warning(f"{key_name} raised: {last_error}")
+            continue
+        except Exception as error:
+            last_error = str(error)
+            logger.exception(f"{key_name} raised an unexpected error")
+            continue
+
+        if result and result.get('content'):
+            return result, key_name, None
+
+        last_error = (result or {}).get('error') or "OCR returned no content"
+        logger.warning(f"{key_name} failed OCR processing: {last_error}")
+
+    return None, None, last_error
+
 
 def create_transaction_extraction_prompt(ocr_content):
     """Create a prompt for extracting transaction data from OCR content."""
@@ -371,11 +475,11 @@ def parse_certificate_dates_response(response_data, ocr_content, model_used=None
         return {
             'success': True,
             'data': {
-                'docType': data.get('docType'),
-                'issueDate': data.get('issueDate'),
-                'expiryDate': data.get('expiryDate'),
-                'certificateNumber': data.get('certificateNumber'),
-                'issuedBy': data.get('issuedBy'),
+                'docType': clean_value(data.get('docType')),
+                'issueDate': normalise_date(data.get('issueDate')),
+                'expiryDate': normalise_date(data.get('expiryDate')),
+                'certificateNumber': clean_value(data.get('certificateNumber')),
+                'issuedBy': clean_value(data.get('issuedBy')),
             },
             'raw_response': response_text,
             'api_used': f'OpenRouter:{model_used}' if model_used else 'OpenRouter',
@@ -383,6 +487,42 @@ def parse_certificate_dates_response(response_data, ocr_content, model_used=None
     except Exception as e:
         logger.warning(f"Error parsing certificate dates response: {str(e)}, using fallback")
         return extract_basic_certificate_dates(ocr_content)
+
+def clean_value(value):
+    """Models often answer with the literal string "null"/"N/A"/"[Blank]" rather
+    than JSON null, which then reaches the UI as a real value."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower() in ("", "null", "none", "n/a", "na", "unknown", "[blank]", "blank", "-"):
+        return None
+    return text
+
+
+def normalise_date(value):
+    """Return an ISO YYYY-MM-DD date, or None.
+
+    The client slices the first 10 characters straight into a <input type=date>,
+    so a UK-style "14/07/2026" would silently land as an empty field.
+    """
+    text = clean_value(value)
+    if not text:
+        return None
+
+    from datetime import datetime as _dt
+
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y",
+                "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y", "%Y/%m/%d"):
+        try:
+            return _dt.strptime(text[:len(fmt) + 8].strip(), fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    # Already ISO-ish (e.g. an ISO timestamp) — keep the date part.
+    import re as _re
+    match = _re.match(r'(\d{4}-\d{2}-\d{2})', text)
+    return match.group(1) if match else None
+
 
 def extract_basic_certificate_dates(ocr_content):
     """Fallback: pattern-match common date formats near issue/expiry
@@ -407,13 +547,79 @@ def extract_basic_certificate_dates(ocr_content):
         'fallback': True,
         'data': {
             'docType': None,
-            'issueDate': issue_date,
-            'expiryDate': expiry_date,
+            'issueDate': normalise_date(issue_date),
+            'expiryDate': normalise_date(expiry_date),
             'certificateNumber': None,
             'issuedBy': None,
         },
         'api_used': 'pattern-matching',
     }
+
+def assess_certificate_validity(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Decide whether an extracted certificate is currently valid.
+
+    Returns a status the UI can act on directly rather than making every caller
+    re-derive it: VALID, EXPIRING_SOON (<= 30 days), EXPIRED, NOT_YET_VALID, or
+    UNKNOWN when no expiry date could be read.
+    """
+    from datetime import date as _date
+
+    expiry = data.get('expiryDate')
+    issue = data.get('issueDate')
+    today = _date.today()
+
+    def parse(value):
+        if not value:
+            return None
+        try:
+            return _date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+
+    expiry_date = parse(expiry)
+    issue_date = parse(issue)
+
+    if not expiry_date:
+        return {
+            'status': 'UNKNOWN',
+            'isValid': None,
+            'daysRemaining': None,
+            'reason': 'No expiry date could be read from this document. Enter it manually.',
+        }
+
+    days_remaining = (expiry_date - today).days
+
+    if days_remaining < 0:
+        return {
+            'status': 'EXPIRED',
+            'isValid': False,
+            'daysRemaining': days_remaining,
+            'reason': f'Expired on {expiry_date.isoformat()} ({abs(days_remaining)} days ago).',
+        }
+
+    if issue_date and issue_date > today:
+        return {
+            'status': 'NOT_YET_VALID',
+            'isValid': False,
+            'daysRemaining': days_remaining,
+            'reason': f'Does not take effect until {issue_date.isoformat()}.',
+        }
+
+    if days_remaining <= 30:
+        return {
+            'status': 'EXPIRING_SOON',
+            'isValid': True,
+            'daysRemaining': days_remaining,
+            'reason': f'Expires in {days_remaining} days ({expiry_date.isoformat()}). Arrange a renewal.',
+        }
+
+    return {
+        'status': 'VALID',
+        'isValid': True,
+        'daysRemaining': days_remaining,
+        'reason': f'Valid until {expiry_date.isoformat()}.',
+    }
+
 
 def extract_transaction_data(ocr_content):
     """Extract transaction data (incl. adjustment breakdown) using OpenRouter, with multiple model fallback."""
@@ -956,27 +1162,12 @@ async def process_docs(
     logger.info("Processing document without cache")
     
     # Try API keys in order
-    result = None
-    used_key_name = None
-    
-    for i, api_key in enumerate(config.API_KEYS, 1):
-        key_name = f"api_key_{i}"
-        
-        # Process file (with PDF to image conversion if needed)
-        logger.info(f"Trying {key_name}")
-        result = process_file_with_images(file_bytes, file.filename, api_key)
-        
-        if result and result.get('success'):
-            used_key_name = key_name
-            logger.info(f"Successfully processed with {key_name}")
-            break
-        else:
-            logger.warning(f"{key_name} failed to process document")
-    
+    result, used_key_name, last_error = run_ocr_with_key_rotation(file_bytes, file.filename)
+
     if not result:
         raise HTTPException(
-            status_code=503, 
-            detail="All API keys failed"
+            status_code=503,
+            detail=f"OCR processing failed: {last_error or 'all API keys failed'}",
         )
     
     # Extract transaction data if requested
@@ -1039,27 +1230,12 @@ async def extract_transaction_from_ocr(
     img_hash = hash_image(file_bytes)
     
     # Process with OCR first (with PDF to image conversion if needed)
-    result = None
-    used_key_name = None
-    
-    for i, api_key in enumerate(config.API_KEYS, 1):
-        key_name = f"api_key_{i}"
-        
-        # Process file (with PDF to image conversion if needed)
-        logger.info(f"Trying {key_name} for OCR")
-        result = process_file_with_images(file_bytes, file.filename, api_key)
-        
-        if result:
-            used_key_name = key_name
-            logger.info(f"OCR completed with {key_name}")
-            break
-        else:
-            logger.warning(f"{key_name} failed OCR processing")
-    
-    if not result or 'content' not in result:
+    result, used_key_name, last_error = run_ocr_with_key_rotation(file_bytes, file.filename)
+
+    if not result:
         raise HTTPException(
-            status_code=503, 
-            detail="OCR processing failed with all API keys"
+            status_code=503,
+            detail=f"OCR processing failed: {last_error or 'all API keys failed'}",
         )
     
     # Extract transaction data
@@ -1122,29 +1298,23 @@ async def extract_certificate_dates_from_ocr(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
 
-    result = None
-    used_key_name = None
-    for i, api_key in enumerate(config.API_KEYS, 1):
-        key_name = f"api_key_{i}"
-        logger.info(f"Trying {key_name} for OCR")
-        result = process_file_with_images(file_bytes, file.filename, api_key)
-        if result:
-            used_key_name = key_name
-            break
-        logger.warning(f"{key_name} failed OCR processing")
-
-    if not result or 'content' not in result:
-        raise HTTPException(status_code=503, detail="OCR processing failed with all API keys")
+    result, used_key_name, last_error = run_ocr_with_key_rotation(file_bytes, file.filename)
+    if not result:
+        raise HTTPException(status_code=503, detail=f"OCR processing failed: {last_error or 'all API keys failed'}")
 
     dates_result = extract_certificate_dates(result['content'])
     if not dates_result['success']:
         raise HTTPException(status_code=500, detail="Certificate date extraction failed")
 
+    certificate_data = dict(dates_result['data'])
+    certificate_data['validity'] = assess_certificate_validity(certificate_data)
+
     return {
         "success": True,
-        "certificate_data": dates_result['data'],
+        "certificate_data": certificate_data,
         "ocr_content": result['content'],
         "used_key": used_key_name,
+        "extraction_method": dates_result.get('api_used'),
         "message": "Certificate dates extracted successfully"
     }
 
