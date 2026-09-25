@@ -7,6 +7,7 @@ _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path="/app/.env")  # container path, when running in Docker
 load_dotenv(dotenv_path=_ENV_PATH)    # local checkout
 
+
 print("DocStrange keys loaded:", sum(1 for n in ("DOCSTRANGE_API_KEY1", "DOCSTRANGE_API_KEY2") if os.getenv(n)))
 
 
