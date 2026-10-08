@@ -15,8 +15,10 @@ import io
 import logging
 from config import config
 
+from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 from agent_brain import agent
+from cache import ocr_cache, make_key
 # from database import Base
 
 # from models import ProcessedDocument, APIUsage
@@ -66,20 +68,23 @@ def convert_pdf_to_images(pdf_bytes: bytes) -> List[bytes]:
     try:
         logger.info("Converting PDF to images...")
         
-        # Convert PDF to images
+        # 200 DPI is plenty for printed invoices and certificates; 300 DPI
+        # more than doubled the pixels to render and upload for no OCR gain.
         images = convert_from_bytes(
             pdf_bytes,
-            dpi=300,  # High DPI for better OCR quality
+            dpi=200,
             first_page=1,
             last_page=None,  # Convert all pages
-            fmt='PNG'
+            fmt='PNG',
+            thread_count=4,
         )
-        
+
         image_bytes_list = []
         for i, image in enumerate(images):
-            # Convert PIL Image to bytes
+            # Convert PIL Image to bytes. No optimize=True: it re-runs the
+            # PNG compressor several times and was the slowest step here.
             img_buffer = io.BytesIO()
-            image.save(img_buffer, format='PNG', optimize=True)
+            image.save(img_buffer, format='PNG')
             img_bytes = img_buffer.getvalue()
             image_bytes_list.append(img_bytes)
             
@@ -109,14 +114,18 @@ def process_file_with_images(file_bytes: bytes, filename: str, api_key: str) -> 
             logger.info("PDF detected, converting to images first...")
             images = convert_pdf_to_images(file_bytes)
             
-            # Process each image with OCR
-            all_results = []
-            for i, image_bytes in enumerate(images):
+            # OCR the pages in parallel — one at a time made an N-page PDF
+            # take N round trips back to back.
+            def ocr_page(index_and_bytes):
+                i, image_bytes = index_and_bytes
                 logger.info(f"Processing image {i+1}/{len(images)}...")
                 result = call_docstrange(api_key, image_bytes, "Extract all text and data from this document", f"page-{i + 1}.png")
                 if result:
                     result['page_number'] = i + 1
-                    all_results.append(result)
+                return result
+
+            with ThreadPoolExecutor(max_workers=min(4, len(images)) or 1) as pool:
+                all_results = [r for r in pool.map(ocr_page, enumerate(images)) if r]
             
             # Combine results from all pages
             if all_results:
@@ -311,6 +320,13 @@ def run_ocr_with_key_rotation(file_bytes: bytes, filename: str) -> tuple[Optiona
     """
     import time
 
+    # Same file bytes → same OCR text, so a re-upload skips the provider.
+    file_key = hash_image(file_bytes)
+    cached = ocr_cache.get("ocr", file_key)
+    if cached and cached.get('content'):
+        logger.info("OCR cache hit")
+        return cached, "cache", None
+
     last_error = None
     # Two passes: the provider occasionally answers 200 with an empty result,
     # and retrying the same key a moment later succeeds. Without this a
@@ -335,6 +351,7 @@ def run_ocr_with_key_rotation(file_bytes: bytes, filename: str) -> tuple[Optiona
             continue
 
         if result and result.get('content'):
+            ocr_cache.set("ocr", file_key, result)
             return result, key_name, None
 
         last_error = (result or {}).get('error') or "OCR returned no content"
@@ -406,7 +423,13 @@ def extract_certificate_dates(ocr_content):
         logger.warning("OpenRouter API key not configured, using fallback date extraction")
         return extract_basic_certificate_dates(ocr_content)
 
-    time.sleep(RATE_LIMIT_DELAY)
+    cache_key = make_key(ocr_content)
+    cached = ocr_cache.get("certificate", cache_key)
+    if cached:
+        return cached
+
+    if RATE_LIMIT_DELAY:
+        time.sleep(RATE_LIMIT_DELAY)
     prompt = create_certificate_dates_extraction_prompt(ocr_content)
 
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -430,6 +453,7 @@ def extract_certificate_dates(ocr_content):
             if resp.status_code == 200:
                 result = parse_certificate_dates_response(resp.json(), ocr_content, model)
                 if result.get('success') and not result.get('fallback'):
+                    ocr_cache.set("certificate", cache_key, result)
                     return result
                 continue
             elif resp.status_code == 401:
@@ -630,7 +654,13 @@ def extract_transaction_data(ocr_content):
         logger.warning("OpenRouter API key not configured, using fallback extraction")
         return extract_basic_transaction_data(ocr_content)
 
-    time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
+    cache_key = make_key(ocr_content)
+    cached = ocr_cache.get("transaction", cache_key)
+    if cached:
+        return cached
+
+    if RATE_LIMIT_DELAY:
+        time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
 
     # Create the extraction prompt
     prompt = create_transaction_extraction_prompt(ocr_content)
@@ -661,6 +691,7 @@ def extract_transaction_data(ocr_content):
                 logger.info(f"OpenRouter responded successfully with {model}")
                 result = parse_llm_response(resp.json(), ocr_content, model)
                 if result.get('success') and not result.get('fallback'):
+                    ocr_cache.set("transaction", cache_key, result)
                     return result
                 else:
                     logger.warning(f"Model {model} returned fallback, trying next model")
@@ -1046,6 +1077,10 @@ PROMPTS = {
 # -----------------------------
 # API Endpoints
 # -----------------------------
+# Handlers that call OCR/LLM providers are plain `def`, not `async def`: the
+# provider calls use blocking `requests`, and inside an async handler they froze
+# the event loop, so one slow upload stalled every other request. FastAPI runs
+# `def` handlers in its threadpool.
 @app.get("/")
 async def root():
     return {"message": "Woodland OCR agent brain is running", "capabilities": ["ocr", "rag", "discovery", "mcp-tools", "openrouter"]}
@@ -1055,7 +1090,7 @@ async def agent_tools():
     return {"tools": agent._tools()}
 
 @app.post("/agent/chat")
-async def agent_chat(request: AgentRequest):
+def agent_chat(request: AgentRequest):
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="question is required")
     try:
@@ -1067,7 +1102,7 @@ async def agent_chat(request: AgentRequest):
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 @app.post("/agent/chat/stream")
-async def agent_chat_stream(request: AgentRequest):
+def agent_chat_stream(request: AgentRequest):
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="question is required")
     try:
@@ -1080,7 +1115,7 @@ async def agent_chat_stream(request: AgentRequest):
         raise HTTPException(status_code=502, detail="AI provider request failed") from error
 
 @app.post("/agent/summarize")
-async def agent_summarize(request: AgentSummaryRequest):
+def agent_summarize(request: AgentSummaryRequest):
     try:
         summary = agent.complete(
             "Summarize this transaction document with sections Transaction, Amounts, Confidence/Warnings, and Review actions. "
@@ -1095,7 +1130,7 @@ async def agent_summarize(request: AgentSummaryRequest):
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 @app.post("/agent/data-audit")
-async def agent_data_audit(request: DataAuditRequest):
+def agent_data_audit(request: DataAuditRequest):
     """Answer a question about which Woodland data is present and which is missing."""
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="question is required")
@@ -1122,7 +1157,7 @@ async def get_available_prompts():
 #     return get_usage_summary(db)
 
 @app.post("/process-docs")
-async def process_docs(
+def process_docs(
     file: UploadFile,
     prompt_type: str = Form("default"),
     custom_prompt: Optional[str] = Form(None),
@@ -1143,7 +1178,7 @@ async def process_docs(
     
     # Read file
     try:
-        file_bytes = await file.read()
+        file_bytes = file.file.read()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
     
@@ -1210,7 +1245,7 @@ async def process_docs(
 #     }
 
 @app.post("/extract-transaction")
-async def extract_transaction_from_ocr(
+def extract_transaction_from_ocr(
     file: UploadFile
 ):
     """
@@ -1223,7 +1258,7 @@ async def extract_transaction_from_ocr(
     
     # Read file
     try:
-        file_bytes = await file.read()
+        file_bytes = file.file.read()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
     
@@ -1281,7 +1316,7 @@ async def extract_transaction_from_ocr(
     }
 
 @app.post("/extract-certificate-dates")
-async def extract_certificate_dates_from_ocr(
+def extract_certificate_dates_from_ocr(
     file: UploadFile
 ):
     """
@@ -1294,7 +1329,7 @@ async def extract_certificate_dates_from_ocr(
         raise HTTPException(status_code=500, detail="No API keys configured")
 
     try:
-        file_bytes = await file.read()
+        file_bytes = file.file.read()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
 

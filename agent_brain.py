@@ -8,6 +8,7 @@ import requests
 # The key lives in .env, not the process environment, so load it the same way
 # llm_config does — without this every call here raised "not configured".
 from llm_config import OPENROUTER_API_KEY, OPENROUTER_MODELS
+from cache import llm_cache, make_key
 
 
 class WoodlandAgent:
@@ -49,6 +50,10 @@ class WoodlandAgent:
             "Never invent financial values. State when data is missing. "
             f"Available MCP tools: {json.dumps(self._tools())}"
         )
+        cache_key = make_key("complete", model or self.model, system, rag_context, prompt)
+        cached = llm_cache.get(cache_key)
+        if cached:
+            return cached
         response = requests.post(
             self.endpoint,
             headers={
@@ -71,6 +76,7 @@ class WoodlandAgent:
         content = response.json().get("choices", [{}])[0].get("message", {}).get("content")
         if not content:
             raise RuntimeError("OpenRouter returned an empty response")
+        llm_cache.set(cache_key, content.strip())
         return content.strip()
 
     def audit_data(self, question: str, summary: Dict[str, Any], records: list, model: Optional[str] = None) -> str:
@@ -99,6 +105,10 @@ class WoodlandAgent:
             "the missing list. You see field names only, never stored values, so never claim "
             "to know what a field contains. Be concise and lead with the biggest gaps."
         )
+        cache_key = make_key("audit", model or self.model, question, summary, ranked)
+        cached = llm_cache.get(cache_key)
+        if cached:
+            return cached
         response = requests.post(
             self.endpoint,
             headers={
@@ -128,6 +138,7 @@ class WoodlandAgent:
         content = response.json().get("choices", [{}])[0].get("message", {}).get("content")
         if not content:
             raise RuntimeError("OpenRouter returned an empty response")
+        llm_cache.set(cache_key, content.strip())
         return content.strip()
 
     def stream(self, prompt: str, context: Optional[Dict[str, Any]] = None, model: Optional[str] = None):
@@ -136,6 +147,13 @@ class WoodlandAgent:
             {"role": "system", "content": "You are Woodland OCR, a precise property-management assistant. Use only supplied context and never invent financial values."},
             {"role": "user", "content": f"Retrieved context:\n{self._retrieve(prompt, context)}\n\n{prompt}"},
         ]
+
+        # A repeat question over the same context replays the cached answer.
+        cache_key = make_key("stream", model or self.model, messages)
+        cached = llm_cache.get(cache_key)
+        if cached:
+            yield cached
+            return
 
         # Try the requested model first, then fall back — a model the account
         # cannot reach 404s, which previously surfaced as a silent empty stream.
@@ -174,6 +192,8 @@ class WoodlandAgent:
                 continue
 
             yielded = False
+            parts: list[str] = []
+            truncated = False
             for line in response.iter_lines(decode_unicode=True):
                 if not line or not line.startswith("data: "):
                     continue
@@ -187,12 +207,16 @@ class WoodlandAgent:
                 delta = choice.get("delta", {}).get("content")
                 if delta:
                     yielded = True
+                    parts.append(delta)
                     yield delta
                 # A truncated answer is worth surfacing rather than ending quietly.
                 if choice.get("finish_reason") == "length":
+                    truncated = True
                     yield "\n\n[truncated: response hit the token limit]"
 
             if yielded:
+                if not truncated:
+                    llm_cache.set(cache_key, "".join(parts))
                 return
             last_error = f"{candidate}: stream produced no content"
 

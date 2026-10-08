@@ -17,8 +17,9 @@ if not OPENROUTER_API_KEY:
     print("WARNING: OPENROUTER_API_KEY not configured. Set it in the environment or a .env file.")
     print("Get a key from: https://openrouter.ai/keys")
 
-# Rate limiting (seconds between requests)
-RATE_LIMIT_DELAY = 1
+# Rate limiting (seconds to wait before each extraction request). Was a
+# fixed 1s on every upload; OpenRouter rate-limits server-side, so default off.
+RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY", "0"))
 
 # Timeout for API requests (seconds)
 API_TIMEOUT = 30
