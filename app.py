@@ -63,16 +63,40 @@ def get_current_month() -> str:
     """Get current month in YYYY-MM format."""
     return datetime.now().strftime("%Y-%m")
 
+PDF_RENDER_DPI = 200  # plenty for printed invoices and certificates
+
+
+def render_pdf_with_pymupdf(pdf_bytes: bytes) -> Optional[List[bytes]]:
+    """Render every page to PNG with PyMuPDF, or None if it isn't installed.
+
+    Preferred over pdf2image: it's a plain pip wheel with no Poppler system
+    install (Poppler missing on Windows made every PDF fall back to a direct
+    upload, which the OCR API rejects past 5 pages), and it's faster.
+    """
+    try:
+        import pymupdf
+    except ImportError:
+        return None
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+        pages = [page.get_pixmap(dpi=PDF_RENDER_DPI).tobytes("png") for page in doc]
+    logger.info(f"Rendered {len(pages)} PDF page(s) with PyMuPDF")
+    return pages
+
+
 def convert_pdf_to_images(pdf_bytes: bytes) -> List[bytes]:
     """Convert PDF to images for better OCR processing."""
     try:
-        logger.info("Converting PDF to images...")
-        
+        rendered = render_pdf_with_pymupdf(pdf_bytes)
+        if rendered is not None:
+            return rendered
+
+        logger.info("Converting PDF to images with pdf2image...")
+
         # 200 DPI is plenty for printed invoices and certificates; 300 DPI
         # more than doubled the pixels to render and upload for no OCR gain.
         images = convert_from_bytes(
             pdf_bytes,
-            dpi=200,
+            dpi=PDF_RENDER_DPI,
             first_page=1,
             last_page=None,  # Convert all pages
             fmt='PNG',
@@ -98,57 +122,142 @@ def convert_pdf_to_images(pdf_bytes: bytes) -> List[bytes]:
         if "poppler" in error_msg.lower() or "page count" in error_msg.lower():
             logger.error(f"Poppler not installed or not in PATH: {error_msg}")
             raise HTTPException(
-                status_code=500, 
-                detail="PDF conversion requires poppler-utils to be installed. Please install it or use image files instead."
+                status_code=500,
+                detail="PDF conversion needs PyMuPDF (pip install pymupdf) or poppler-utils. Install one, or upload image files instead."
             )
         else:
             logger.error(f"Error converting PDF to images: {error_msg}")
             raise HTTPException(status_code=500, detail=f"PDF conversion failed: {error_msg}")
 
-def process_file_with_images(file_bytes: bytes, filename: str, api_key: str) -> Dict[str, Any]:
-    """Process file, converting PDF to images if needed."""
+def ocr_one_page(api_key: str, image_bytes: bytes, index: int, total: int) -> Optional[dict]:
+    """OCR one page image. Each page is cached by its own hash, so when a
+    document is retried (one page timed out) pages already read come straight
+    back and only the missing ones go to the provider again. A failed page
+    gets one retry."""
+    page_key = hash_image(image_bytes)
+    cached = ocr_cache.get("page", page_key)
+    if cached and cached.get('content'):
+        logger.info(f"Page {index+1}/{total}: cache hit")
+        return {**cached, 'page_number': index + 1}
+    result = None
+    for attempt in (1, 2):
+        logger.info(f"Processing image {index+1}/{total}" + (" (retry)" if attempt > 1 else "") + "...")
+        result = call_docstrange(api_key, image_bytes, "Extract all text and data from this document", f"page-{index + 1}.png", timeout=config.PAGE_TIMEOUT)
+        if result and result.get('content'):
+            break
+    if result and result.get('content'):
+        ocr_cache.set("page", page_key, result)
+        result['page_number'] = index + 1
+        return result
+    return None
+
+
+def combine_page_results(page_results: List[dict]) -> Dict[str, Any]:
+    """One result for a multi-page PDF, page text joined with page markers."""
+    return {
+        'success': True,
+        'content': '\n\n'.join(
+            f"--- Page {r.get('page_number', 'Unknown')} ---\n{r['content']}" for r in page_results if r.get('content')
+        ),
+        'format': 'combined',
+        'file_type': 'pdf',
+        'pages_processed': len(page_results),
+        'processing_time': sum(r.get('processing_time', 0) for r in page_results),
+        'record_id': page_results[0].get('record_id'),
+        'processing_status': 'completed',
+        'multiple_outputs': True,
+    }
+
+
+_EXPIRY_WORDS = r"(expir\w*|valid\s+(until|to|till)|next\s+(inspection|test|check|safety\s+check|service|assessment|review)|due\s+(by|date|on)|renewal|re-?inspect\w*|recommended\s+date)"
+_DATE_FORMS = (
+    r"(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}"  # 12/10/2026
+    r"|\d{4}-\d{2}-\d{2}"  # 2026-10-12
+    r"|\d{1,2}(st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?,?\s+\d{4}"  # 12 October 2026
+    r"|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(st|nd|rd|th)?,?\s+\d{4})"  # October 12, 2026
+)
+
+
+def has_expiry_date(text: str) -> bool:
+    """Cheap check (no LLM) for an expiry/next-due wording with a date close
+    after it — e.g. "Valid until 14 October 2026", "| Expiry date | 12/10/2026 |".
+    Used to stop OCRing a certificate once its expiry is on the pages read.
+    A miss only costs reading another page, so it errs on the strict side."""
+    import re
+    return re.search(_EXPIRY_WORDS + r"[^\n]{0,80}?" + _DATE_FORMS, text or "", re.IGNORECASE) is not None
+
+
+def ocr_certificate(file_bytes: bytes, filename: str) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    """OCR a certificate page by page, stopping once the expiry date shows up.
+
+    Most certificates carry the expiry on page 1, so this is usually a single
+    OCR call; pages are read in order up to config.CERT_MAX_PAGES when it
+    doesn't. Images and other non-PDF files go through the normal path.
+    Same return shape as run_ocr_with_key_rotation.
+    """
+    if not filename.lower().endswith('.pdf'):
+        return run_ocr_with_key_rotation(file_bytes, filename)
+
+    file_key = hash_image(file_bytes) + "-cert"
+    cached = ocr_cache.get("ocr", file_key)
+    if cached and cached.get('content'):
+        logger.info("Certificate OCR cache hit")
+        return cached, "cache", None
+
+    try:
+        images = convert_pdf_to_images(file_bytes)
+    except HTTPException as error:
+        return None, None, str(error.detail)
+    total = min(len(images), config.CERT_MAX_PAGES)
+
+    pages: List[dict] = []
+    used_key = None
+    last_error = None
+    for i in range(total):
+        page = None
+        for k, api_key in enumerate(config.API_KEYS, 1):
+            try:
+                page = ocr_one_page(api_key, images[i], i, total)
+            except DocumentRejected as error:
+                return None, None, f"The OCR service rejected this document: {error}"
+            if page:
+                used_key = used_key or f"api_key_{k}"
+                break
+            last_error = f"page {i + 1} could not be read"
+        if page:
+            pages.append(page)
+            if has_expiry_date(page['content']):
+                logger.info(f"Expiry date found on page {i + 1} — skipping the remaining {len(images) - i - 1} page(s)")
+                break
+
+    if not pages:
+        return None, None, last_error or "OCR returned no content"
+    result = combine_page_results(pages)
+    result['pages_in_document'] = len(images)
+    ocr_cache.set("ocr", file_key, result)
+    return result, used_key, None
+
+
+def process_file_with_images(file_bytes: bytes, filename: str, api_key: str, max_pages: Optional[int] = None) -> Dict[str, Any]:
+    """Process file, converting PDF to images if needed. `max_pages` keeps
+    only the first pages of a PDF."""
     file_extension = filename.lower().split('.')[-1]
-    
+
     if file_extension == 'pdf':
         try:
             logger.info("PDF detected, converting to images first...")
             images = convert_pdf_to_images(file_bytes)
-            
+            if max_pages and len(images) > max_pages:
+                logger.info(f"Using the first {max_pages} of {len(images)} pages")
+                images = images[:max_pages]
+
             # OCR the pages in parallel — one at a time made an N-page PDF
             # take N round trips back to back.
-            def ocr_page(index_and_bytes):
-                i, image_bytes = index_and_bytes
-                logger.info(f"Processing image {i+1}/{len(images)}...")
-                result = call_docstrange(api_key, image_bytes, "Extract all text and data from this document", f"page-{i + 1}.png")
-                if result:
-                    result['page_number'] = i + 1
-                return result
-
             with ThreadPoolExecutor(max_workers=min(4, len(images)) or 1) as pool:
-                all_results = [r for r in pool.map(ocr_page, enumerate(images)) if r]
-            
-            # Combine results from all pages
+                all_results = [r for r in pool.map(lambda p: ocr_one_page(api_key, p[1], p[0], len(images)), enumerate(images)) if r]
+
             if all_results:
-                combined_result = {
-                    'success': True,
-                    'content': '',
-                    'format': 'combined',
-                    'file_type': 'pdf',
-                    'pages_processed': len(all_results),
-                    'processing_time': sum(r.get('processing_time', 0) for r in all_results),
-                    'record_id': all_results[0].get('record_id'),
-                    'processing_status': 'completed',
-                    'multiple_outputs': True
-                }
-                
-                # Combine content from all pages
-                combined_content = []
-                for result in all_results:
-                    if result.get('content'):
-                        combined_content.append(f"--- Page {result.get('page_number', 'Unknown')} ---\n{result['content']}")
-                
-                combined_result['content'] = '\n\n'.join(combined_content)
-                return combined_result
+                return combine_page_results(all_results)
             else:
                 return {'success': False, 'error': 'No pages could be processed'}
                 
@@ -222,7 +331,12 @@ def process_file_with_images(file_bytes: bytes, filename: str, api_key: str) -> 
     
 #     return summary
 
-def call_docstrange(api_key: str, image_bytes: bytes, prompt: str, filename: str = "upload.png") -> Optional[dict]:
+class DocumentRejected(Exception):
+    """The OCR API refused the file itself (bad format, too many pages).
+    Every key and retry would get the same answer, so rotation stops."""
+
+
+def call_docstrange(api_key: str, image_bytes: bytes, prompt: str, filename: str = "upload.png", timeout: Optional[int] = None) -> Optional[dict]:
     """Run one file through the Nanonets extraction API and return a flat
     {'success', 'content', ...} dict.
 
@@ -240,7 +354,7 @@ def call_docstrange(api_key: str, image_bytes: bytes, prompt: str, filename: str
             headers={"Authorization": f"Bearer {api_key}"},
             files=files,
             data=data,
-            timeout=config.REQUEST_TIMEOUT,
+            timeout=timeout or config.REQUEST_TIMEOUT,
         )
     except requests.exceptions.RequestException as e:
         logger.error(f"API request exception: {str(e)}")
@@ -250,6 +364,13 @@ def call_docstrange(api_key: str, image_bytes: bytes, prompt: str, filename: str
         # The body carries the actionable reason (deprecated path, bad format,
         # quota), so log it rather than just the status.
         logger.error(f"OCR API failed with status {response.status_code}: {response.text[:400]}")
+         # 400/413/415/422 are about the file, not the key — no point retrying.
+        if response.status_code in (400, 413, 415, 422):
+            try:
+                detail = response.json().get("detail") or response.text
+            except ValueError:
+                detail = response.text
+            raise DocumentRejected(str(detail)[:300])
         return None
 
     try:
@@ -311,7 +432,7 @@ def extract_docstrange_content(payload: Dict[str, Any]) -> Optional[str]:
 
     return None
 
-def run_ocr_with_key_rotation(file_bytes: bytes, filename: str) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+def run_ocr_with_key_rotation(file_bytes: bytes, filename: str, max_pages: Optional[int] = None) -> tuple[Optional[dict], Optional[str], Optional[str]]:
     """Try each configured key in turn. Returns (result, key_name, last_error).
 
     A key that raises (bad PDF, provider 5xx) must not abort the rotation, and
@@ -321,7 +442,7 @@ def run_ocr_with_key_rotation(file_bytes: bytes, filename: str) -> tuple[Optiona
     import time
 
     # Same file bytes → same OCR text, so a re-upload skips the provider.
-    file_key = hash_image(file_bytes)
+    file_key = hash_image(file_bytes) + (f"-p{max_pages}" if max_pages else "")
     cached = ocr_cache.get("ocr", file_key)
     if cached and cached.get('content'):
         logger.info("OCR cache hit")
@@ -340,7 +461,10 @@ def run_ocr_with_key_rotation(file_bytes: bytes, filename: str) -> tuple[Optiona
             time.sleep(2)
         logger.info(f"Trying {key_name} for OCR")
         try:
-            result = process_file_with_images(file_bytes, filename, api_key)
+            result = process_file_with_images(file_bytes, filename, api_key, max_pages)
+        except DocumentRejected as error:
+            logger.warning(f"OCR API rejected the document, not retrying: {error}")
+            return None, None, f"The OCR service rejected this document: {error}"
         except HTTPException as error:
             last_error = str(error.detail)
             logger.warning(f"{key_name} raised: {last_error}")
@@ -1333,7 +1457,7 @@ def extract_certificate_dates_from_ocr(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
 
-    result, used_key_name, last_error = run_ocr_with_key_rotation(file_bytes, file.filename)
+    result, used_key_name, last_error = ocr_certificate(file_bytes, file.filename)
     if not result:
         raise HTTPException(status_code=503, detail=f"OCR processing failed: {last_error or 'all API keys failed'}")
 

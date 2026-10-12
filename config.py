@@ -31,5 +31,12 @@ class Config:
     # prompts read better than the flattened json shape.
     DOCSTRANGE_OUTPUT_FORMAT = os.getenv("DOCSTRANGE_OUTPUT_FORMAT", "markdown")
     REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
+    # One page image should take seconds; a page stuck longer than this is
+    # retried once instead of holding the whole document past the API
+    # server's 5-minute limit.
+    PAGE_TIMEOUT = int(os.getenv("OCR_PAGE_TIMEOUT", "90"))
+    # Certificates are read page by page and stop once the expiry date is
+    # found (usually page 1); this caps how far it reads when it isn't.
+    CERT_MAX_PAGES = int(os.getenv("CERT_MAX_PAGES", "5"))
 
 config = Config()

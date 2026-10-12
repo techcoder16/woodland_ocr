@@ -8,4 +8,6 @@ pydantic==2.5.0
 python-dotenv==1.0.0
 alembic==1.13.0
 pdf2image==1.16.3
+# Renders PDF pages without a Poppler install (preferred over pdf2image).
+pymupdf==1.28.2
 Pillow==10.4.0
