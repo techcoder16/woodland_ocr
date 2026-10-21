@@ -1,38 +1,81 @@
-name: Deploy Equity research frontend to the server
+name: Deploy OCR
 
+# dev branch  -> dev  (account 623553998786)
+# main branch -> prod (account 549803795489)
+# Same tagging as the backend: sha-<commit> forever, moving dev/prod tag for ECS.
 on:
   push:
-    branches: [ main ]
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-ocr-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-2
+  REPO: woodland/ocr
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 40
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install SSH key and known hosts
-        uses: shimataro/ssh-key-action@v2
+      - name: Pick environment
+        run: |
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            echo "ENV=prod" >> "$GITHUB_ENV"; echo "ACCOUNT=549803795489" >> "$GITHUB_ENV"
+          else
+            echo "ENV=dev" >> "$GITHUB_ENV"; echo "ACCOUNT=623553998786" >> "$GITHUB_ENV"
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          name: id_rsa
-          known_hosts: |
-            ${{ secrets.SSH_HOST }}
-          if_key_exists: replace
+          role-to-assume: arn:aws:iam::${{ env.ACCOUNT }}:role/woodland-${{ env.ENV }}-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Add SSH host to known_hosts
-        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Save private key
+      - name: Build and push image
         run: |
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > key.pem
-          chmod 600 key.pem
+          IMAGE="${{ steps.ecr.outputs.registry }}/$REPO"
+          SHA_TAG="sha-${GITHUB_SHA::7}"
+          echo "SHA_TAG=$SHA_TAG" >> "$GITHUB_ENV"
+          docker build -t "$IMAGE:$SHA_TAG" .
+          docker push "$IMAGE:$SHA_TAG"
+          if [ "$ENV" = "prod" ]; then
+            RELEASE="v$(date -u +%Y.%m.%d).${GITHUB_RUN_NUMBER}"
+            docker tag "$IMAGE:$SHA_TAG" "$IMAGE:$RELEASE"
+            docker push "$IMAGE:$RELEASE"
+            echo "Release $RELEASE" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-      - name: Upload deployment script
+      - name: Move ${{ env.ENV }} tag (remember the previous image)
         run: |
-          scp -i key.pem -o StrictHostKeyChecking=no ./deploy.sh ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }}:~/deploy.sh
+          PREV=$(aws ecr batch-get-image --repository-name "$REPO" --image-ids imageTag="$ENV" --query 'images[0].imageManifest' --output text || true)
+          if [ -n "$PREV" ] && [ "$PREV" != "None" ]; then printf '%s' "$PREV" > prev-manifest.json; fi
+          NEW=$(aws ecr batch-get-image --repository-name "$REPO" --image-ids imageTag="$SHA_TAG" --query 'images[0].imageManifest' --output text)
+          aws ecr put-image --repository-name "$REPO" --image-tag "$ENV" --image-manifest "$NEW" >/dev/null 2>&1 \
+            || echo "tag $ENV already points at $SHA_TAG"
 
-      - name: Execute deployment script on server
+      - name: Roll out
         run: |
-          ssh -i key.pem -o StrictHostKeyChecking=no ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }} "chmod +x ~/deploy.sh && ~/deploy.sh"
+          aws ecs update-service --cluster "woodland-$ENV" --service "woodland-$ENV-ocr" --force-new-deployment >/dev/null
+          aws ecs wait services-stable --cluster "woodland-$ENV" --services "woodland-$ENV-ocr"
+          echo "Deployed $SHA_TAG to $ENV" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore previous image on failure
+        if: failure()
+        run: |
+          if [ -f prev-manifest.json ]; then
+            aws ecr put-image --repository-name "$REPO" --image-tag "$ENV" --image-manifest "$(cat prev-manifest.json)" >/dev/null 2>&1 || true
+            aws ecs update-service --cluster "woodland-$ENV" --service "woodland-$ENV-ocr" --force-new-deployment >/dev/null
+            echo "Rolled $ENV back to the previous image" >> "$GITHUB_STEP_SUMMARY"
+          fi
