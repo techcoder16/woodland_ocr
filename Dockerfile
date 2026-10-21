@@ -1,28 +1,18 @@
-# Dockerfile
+# Production image: no .env baked in (config comes from ECS env/SSM), no reload.
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (for better caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY . .
-COPY .env /app/.env
+RUN rm -f .env && mkdir -p /app/uploads /tmp/ocr-cache
 
-
-# Create uploads directory
-RUN mkdir -p /app/uploads
-
-# Expose port
 EXPOSE 5006
-
-# Run the application
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5006", "--reload"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5006"]

@@ -97,3 +97,7 @@ npm-debug.log*
 # Local development files
 .local/
 local_*
+# Secrets
+.env
+.env.*
+*.db
