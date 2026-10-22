@@ -79,6 +79,11 @@ jobs:
           IMAGE="${{ steps.ecr.outputs.registry }}/$REPO"
           SHA_TAG="sha-${GITHUB_SHA::7}"
           echo "SHA_TAG=$SHA_TAG" >> "$GITHUB_ENV"
+          # sha-* tags are immutable: a re-run of the same commit reuses the image.
+          if aws ecr describe-images --repository-name "$REPO" --image-ids imageTag="$SHA_TAG" >/dev/null 2>&1; then
+            echo "$SHA_TAG already in ECR, reusing it"
+            exit 0
+          fi
           docker build -t "$IMAGE:$SHA_TAG" .
           docker push "$IMAGE:$SHA_TAG"
           if [ "$ENV" = "prod" ]; then
@@ -91,8 +96,12 @@ jobs:
           PREV=$(aws ecr batch-get-image --repository-name "$REPO" --image-ids imageTag="$ENV" --query 'images[0].imageManifest' --output text || true)
           if [ -n "$PREV" ] && [ "$PREV" != "None" ]; then printf '%s' "$PREV" > prev-manifest.json; fi
           NEW=$(aws ecr batch-get-image --repository-name "$REPO" --image-ids imageTag="$SHA_TAG" --query 'images[0].imageManifest' --output text)
-          aws ecr put-image --repository-name "$REPO" --image-tag "$ENV" --image-manifest "$NEW" >/dev/null 2>&1 \
-            || echo "tag $ENV already points at $SHA_TAG"
+          if [ "$PREV" = "$NEW" ]; then
+            echo "tag $ENV already points at $SHA_TAG"
+          else
+            # Must not be swallowed: if the tag doesn't move, ECS keeps running the old image.
+            aws ecr put-image --repository-name "$REPO" --image-tag "$ENV" --image-manifest "$NEW" >/dev/null
+          fi
 
       - name: Roll out
         run: |
