@@ -526,7 +526,9 @@ Extract data from this certificate/license document and return ONLY this JSON fo
   "issueDate": "YYYY-MM-DD or null",
   "expiryDate": "YYYY-MM-DD or null",
   "certificateNumber": "string or null",
-  "issuedBy": "string or null"
+  "issuedBy": "string or null",
+  "licenceType": "for a property licence only: SELECTIVE, ADDITIONAL or HMO (mandatory HMO licence = HMO), otherwise null",
+  "borough": "for a property licence only: the London borough / council that issued it, e.g. Brent, Barnet, Hackney, otherwise null"
 }}
 
 Look for terms like: "issue date", "inspection date", "date of inspection", "valid from" for issueDate.
@@ -628,6 +630,8 @@ def parse_certificate_dates_response(response_data, ocr_content, model_used=None
                 'expiryDate': normalise_date(data.get('expiryDate')),
                 'certificateNumber': clean_value(data.get('certificateNumber')),
                 'issuedBy': clean_value(data.get('issuedBy')),
+                'licenceType': normalise_licence_type(data.get('licenceType')),
+                'borough': clean_value(data.get('borough')),
             },
             'raw_response': response_text,
             'api_used': f'OpenRouter:{model_used}' if model_used else 'OpenRouter',
@@ -635,6 +639,15 @@ def parse_certificate_dates_response(response_data, ocr_content, model_used=None
     except Exception as e:
         logger.warning(f"Error parsing certificate dates response: {str(e)}, using fallback")
         return extract_basic_certificate_dates(ocr_content)
+
+def normalise_licence_type(value):
+    """Map whatever the model said onto SELECTIVE / ADDITIONAL / HMO, or None."""
+    text = (clean_value(value) or '').upper()
+    for key in ('SELECTIVE', 'ADDITIONAL', 'HMO'):
+        if key in text:
+            return key
+    return None
+
 
 def clean_value(value):
     """Models often answer with the literal string "null"/"N/A"/"[Blank]" rather
